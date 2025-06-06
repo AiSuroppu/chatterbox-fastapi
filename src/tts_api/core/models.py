@@ -44,7 +44,7 @@ class PostProcessingOptions(BaseModel):
     vad_min_silence_ms: int = Field(100, ge=0, le=2000, description="Minimum silence duration (ms) to be replaced.")
     vad_speech_pad_ms: int = Field(50, ge=0, le=500, description="Padding (ms) added to the start/end of speech.")
     vad_fade_ms: int = Field(10, ge=0, le=200, description="Duration (ms) of fade-in/out at speech boundaries for smooth transitions.")
-    normalize_audio: bool = Field(False, description="Normalize audio loudness with ffmpeg.")
+    normalize_audio: bool = Field(True, description="Normalize audio loudness with ffmpeg.")
     normalize_method: AudioNormalizationMethod = Field(AudioNormalizationMethod.EBU, description="Normalization method.")
     normalize_level: float = Field(-18.0, ge=-70.0, le=-5.0, description="EBU Target Integrated Loudness (I).")
     export_format: ExportFormat = Field(ExportFormat.MP3, description="Final audio format.")

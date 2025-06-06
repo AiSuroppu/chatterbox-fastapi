@@ -122,7 +122,7 @@ This example shows all available parameters with their default values. You can c
     "vad_min_silence_ms": 100,
     "vad_speech_pad_ms": 50,
     "vad_fade_ms": 10,
-    "normalize_audio": false,
+    "normalize_audio": true,
     "normalize_method": "ebu",
     "normalize_level": -18.0,
     "export_format": "mp3"
