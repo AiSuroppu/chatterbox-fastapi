@@ -29,17 +29,17 @@ def _generate_single_candidate(
     candidate_index: int = 0
 ) -> torch.Tensor:
     """Helper function to generate one full audio waveform."""
+    if base_seed == 0:
+        # Use a different random seed for each candidate
+        set_seed(random.randint(1, 2**32 - 1))
+    else:
+        # Create a deterministic but unique seed for each candidate
+        set_seed(base_seed + candidate_index * 1000)
+
     waveform_list = []
     for i, chunk in enumerate(text_chunks):
         if not chunk.strip():
             continue
-        
-        if base_seed == 0:
-            # Use a different random seed for each chunk and candidate
-            set_seed(random.randint(1, 2**32 - 1))
-        else:
-            # Create a deterministic but unique seed for each candidate
-            set_seed(base_seed + candidate_index * 1000)
 
         wav_tensor = engine.generate(chunk, engine_params, ref_audio_path=ref_audio_path)
         waveform_list.append(wav_tensor)
