@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tts-api-wrapper"
+version = "1.0.0"
+description = "A modular FastAPI wrapper for running various open-source TTS engines."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+    { name = "Ai Suroppu" },
+]
+
+# Core dependencies for the API wrapper itself.
+# These were previously in requirements.base.txt
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic-settings",
+    "ffmpeg-python",
+    "silero-vad",
+    "librosa",
+    "pysbd",
+    "python-multipart",
+]
+
+[project.urls]
+Homepage = "https://github.com/AiSuroppu/chatterbox-fastapi"
+Repository = "https://github.com/AiSuroppu/chatterbox-fastapi"
+
+# This section tells setuptools where to find your Python package.
+[tool.setuptools.packages.find]
+where = ["src"]
