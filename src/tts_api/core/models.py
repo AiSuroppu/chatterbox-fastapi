@@ -1,6 +1,6 @@
 from enum import Enum
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Literal, List, Union
 
 # --- Engine Specific Parameter Models ---
 
@@ -55,7 +55,7 @@ class PostProcessingOptions(BaseModel):
 class BaseTTSRequest(BaseModel):
     """Base model with parameters common to all TTS engines."""
     text: str = Field(..., description="The text to be converted to speech.", min_length=1)
-    seed: int = Field(0, description="Random seed. 0 for a random seed.")
+    seed: Union[int, List[int]] = Field(0, description="Random seed or a list of seeds. If a list is provided, seeds are used sequentially for each generation candidate. A seed of 0 means use a random seed.")
     best_of: int = Field(1, ge=1, le=10, description="Generate multiple speech outputs and automatically return the one with the highest speech-to-audio-duration ratio. Higher values take longer but can improve quality.")
     text_processing: TextProcessingOptions = Field(default_factory=TextProcessingOptions)
     post_processing: PostProcessingOptions = Field(default_factory=PostProcessingOptions)
