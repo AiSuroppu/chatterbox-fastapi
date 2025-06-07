@@ -66,20 +66,22 @@ def process_and_chunk_text(
     Cleans and chunks text according to the specified strategy, ensuring no chunk
     exceeds the max_chunk_length.
     """
-    cleaned_text = clean_text(text, text_options.remove_bracketed_text)
-    if text_options.to_lowercase:
-        cleaned_text = cleaned_text.lower()
-        
     if text_options.batching_strategy == 'simple':
+        cleaned_text = clean_text(text, text_options.remove_bracketed_text)
+        if text_options.to_lowercase:
+            cleaned_text = cleaned_text.lower()
         return _force_split_long_chunk(cleaned_text, text_options.max_chunk_length)
 
     # 'recursive' strategy (default)
     segmenter = get_segmenter(text_options.text_language)
-    initial_sentences = segmenter.segment(cleaned_text)
+    initial_sentences = segmenter.segment(text)
     
     # Proactively split any sentence that is itself too long
     sentences = []
     for sent in initial_sentences:
+        sent = clean_text(sent, text_options.remove_bracketed_text)
+        if text_options.to_lowercase:
+            sent = sent.lower()
         sentences.extend(_force_split_long_chunk(sent, text_options.max_chunk_length))
 
     # Group sentences into chunks that respect max_chunk_length
