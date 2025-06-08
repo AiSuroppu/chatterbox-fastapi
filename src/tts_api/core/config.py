@@ -1,6 +1,10 @@
 import torch
 from pydantic_settings import BaseSettings
-import os
+from pathlib import Path
+
+# Define the project's base directory to reliably locate the .cache folder
+BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
+DEFAULT_NEMO_CACHE_DIR = BASE_DIR / ".cache" / "nemo"
 
 class Settings(BaseSettings):
     DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -12,6 +16,17 @@ class Settings(BaseSettings):
     # List of engine names to load on startup.
     # In .env file: ENABLED_MODELS='["chatterbox"]'
     ENABLED_MODELS: list[str] = ["chatterbox"]
+
+    # Path to a directory for NeMo's compiled grammar files.
+    # Defaults to ./.cache/nemo within the project root.
+    NEMO_CACHE_DIR: str = str(DEFAULT_NEMO_CACHE_DIR)
+
+    # LRU cache size for the NeMo Normalizer instances.
+    NEMO_NORMALIZER_CACHE_SIZE: int = 4
+
+    # LRU cache size for the pysbd Segmenter instances.
+    PYSBD_CACHE_SIZE: int = 4
+
 
     class Config:
         env_file = ".env"

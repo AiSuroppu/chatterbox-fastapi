@@ -131,7 +131,7 @@ class TestProcessAndChunkText:
         options_true = TextProcessingOptions(remove_bracketed_text=True, to_lowercase=False)
 
         # Using the default PARAGRAPH strategy, this is returned as a single chunk.
-        expected_true = ['This is useful text and . .']
+        expected_true = ["This is useful text and . *Also asterisks*."]
         assert process_and_chunk_text(TEXT_WITH_BRACKETS, options_true) == expected_true
 
         # Test when False (this part of the original test was correct)
@@ -213,14 +213,10 @@ class TestProcessAndChunkTextEdgeCases:
         text = "Paragraph 1.\n\n\n\nParagraph 2."
         options = TextProcessingOptions(chunking_strategy=TextChunkingStrategy.PARAGRAPH)
         chunks = process_and_chunk_text(text, options)
-        assert chunks == ["paragraph 1.", "paragraph 2."]
+        assert chunks == ["Paragraph 1.", "Paragraph 2."]
 
-    @patch('tts_api.services.text_processing._chunk_sentences_balanced')
-    def test_paragraph_boundary_conditions_with_max_length(self, mock_balanced_chunker):
+    def test_paragraph_boundary_conditions_with_max_length(self):
         """Test PARAGRAPH strategy's fallback logic right at the max_length boundary."""
-        # Set a mock return value to prevent errors if it's called.
-        mock_balanced_chunker.return_value = ["mocked", "split"]
-        
         options = TextProcessingOptions(
             chunking_strategy=TextChunkingStrategy.PARAGRAPH,
             max_chunk_length=52,
@@ -228,19 +224,19 @@ class TestProcessAndChunkTextEdgeCases:
         )
         
         # Case 1: Length is exactly max_length. Should NOT fall back.
-        text_at_limit = "This paragraph has length of exactly fifty-two chars"
+        text_at_limit = "This paragraph has length of exactly fiftytwo chars."
         assert len(text_at_limit) == 52
         chunks_at_limit = process_and_chunk_text(text_at_limit, options)
         assert chunks_at_limit == [text_at_limit]
-        mock_balanced_chunker.assert_not_called() # Crucial check
         
         # Case 2: Length is one over max_length. SHOULD fall back.
         text_over_limit = "This paragraph has a length of over fifty-two characters."
         assert len(text_over_limit) > 52
         chunks_over_limit = process_and_chunk_text(text_over_limit, options)
-        # We assert that the fallback was called and check its output.
-        mock_balanced_chunker.assert_called_once()
-        assert chunks_over_limit == ["mocked", "split"] # Check we got the mocked output
+        assert chunks_over_limit == [
+            "This paragraph has a length of over fifty-two",
+            "characters."
+        ]
 
     def test_greedy_strategy_boundary_fill(self):
         """Test GREEDY strategy when a chunk exactly fills or just misses max_length."""
@@ -250,11 +246,11 @@ class TestProcessAndChunkTextEdgeCases:
 
         # Case 1: max_length allows the combination
         options_fit = TextProcessingOptions(chunking_strategy=TextChunkingStrategy.GREEDY, max_chunk_length=69)
-        assert process_and_chunk_text(text, options_fit) == [f"{s1.lower()} {s2.lower()}"]
+        assert process_and_chunk_text(text, options_fit) == [f"{s1} {s2}"]
 
         # Case 2: max_length is one too short, forcing a split
         options_no_fit = TextProcessingOptions(chunking_strategy=TextChunkingStrategy.GREEDY, max_chunk_length=66)
-        assert process_and_chunk_text(text, options_no_fit) == [s1.lower(), s2.lower()]
+        assert process_and_chunk_text(text, options_no_fit) == [s1, s2]
 
     def test_interaction_of_cleaning_and_splitting(self):
         """Verify that cleaning happens correctly within the sentence processing loop."""
@@ -277,7 +273,7 @@ class TestProcessAndChunkTextEdgeCases:
             max_chunk_length=100
         )
         chunks = process_and_chunk_text(long_word, options)
-        assert chunks == ["a" * 100, "a" * 50]
+        assert chunks == ["a" * 100, "a" * 50 + "."]
         
     @pytest.mark.parametrize("strategy", list(TextChunkingStrategy))
     def test_chunks_are_never_empty_strings(self, strategy):

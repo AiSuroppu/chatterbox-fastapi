@@ -111,8 +111,11 @@ This example shows all available parameters with their default values. You can c
   "seed": 0,
   "best_of": 1,
   "text_processing": {
-    "to_lowercase": true,
+    "text_language": "en",
+    "to_lowercase": false,
     "remove_bracketed_text": false,
+    "use_nemo_normalizer": false,
+    "apply_advanced_cleaning": false,
     "chunking_strategy": "paragraph",
     "shortness_penalty_factor": 2.0,
     "ideal_chunk_length": 300,

@@ -102,7 +102,15 @@ def main(engine_name, cuda_version_override):
     print("7. Creating .env file...")
     with open(".env", "w") as f:
         f.write(f'ENABLED_MODELS=\'["{engine_name}"]\'\n')
-        f.write(f'DEVICE="{"cuda" if cuda_version else "cpu"}"\n')
+        f.write(f'DEVICE="{"cuda" if cuda_version else "cpu"}"\n\n')
+        f.write("# NeMo text normalizer will cache compiled grammars here.\n")
+        f.write("# You can change this to a global path if you prefer.\n")
+        nemo_cache_path = os.path.join(os.getcwd(), ".cache", "nemo").replace("\\", "/")
+        f.write(f'#NEMO_CACHE_DIR="{nemo_cache_path}"\n\n')
+        f.write("# LRU cache sizes for language-specific normalizers and segmenters.\n")
+        f.write("# Increase if you support many languages concurrently.\n")
+        f.write("#NEMO_NORMALIZER_CACHE_SIZE=4\n")
+        f.write("#PYSBD_CACHE_SIZE=4\n")
     
     # --- Step 8: Pre-download required models ---
     print("8. Pre-downloading required models...")

@@ -6,6 +6,9 @@ __pycache__/
 # Environment & Configuration
 .env
 
+# Cache files
+.cache
+
 # IDE
 .vscode/
 .idea/

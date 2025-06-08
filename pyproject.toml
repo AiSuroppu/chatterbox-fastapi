@@ -22,6 +22,7 @@ dependencies = [
     "ffmpeg-python",
     "silero-vad",
     "pysbd",
+    "nemo_text_processing",
     "python-multipart",
 ]
 

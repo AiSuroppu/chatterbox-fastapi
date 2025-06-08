@@ -21,9 +21,11 @@ class TextChunkingStrategy(str, Enum):
 
 class TextProcessingOptions(BaseModel):
     """Options for cleaning and chunking the input text."""
-    text_language: str = Field("en", description="Language code for sentence segmentation (e.g., 'en', 'de', 'es').")
-    to_lowercase: bool = Field(True, description="Convert input text to lowercase.")
-    remove_bracketed_text: bool = Field(False, description="Remove text in brackets [], parentheses (), or asterisks **.")
+    text_language: str = Field("en", description="Language code for sentence segmentation and normalization (e.g., 'en', 'de', 'es').")
+    to_lowercase: bool = Field(False, description="Convert input text to lowercase.")
+    remove_bracketed_text: bool = Field(False, description="Remove text in brackets [] and parentheses ().")
+    use_nemo_normalizer: bool = Field(False, description="Use NeMo to normalize numbers, dates, currencies, etc., to words.")
+    apply_advanced_cleaning: bool = Field(False, description="Apply advanced, heuristic cleaning rules like stutter removal ('b-but') and emphasis normalization ('*word*').")
     chunking_strategy: TextChunkingStrategy = Field(
         TextChunkingStrategy.PARAGRAPH, 
         description=(
