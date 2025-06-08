@@ -113,7 +113,7 @@ This example shows all available parameters with their default values. You can c
   "text_processing": {
     "to_lowercase": true,
     "remove_bracketed_text": false,
-    "batching_strategy": "paragraph",
+    "chunking_strategy": "paragraph",
     "shortness_penalty_factor": 2.0,
     "ideal_chunk_length": 300,
     "max_chunk_length": 500
