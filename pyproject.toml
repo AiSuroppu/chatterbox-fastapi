@@ -21,7 +21,6 @@ dependencies = [
     "pydantic-settings",
     "ffmpeg-python",
     "silero-vad",
-    "librosa",
     "pysbd",
     "python-multipart",
 ]

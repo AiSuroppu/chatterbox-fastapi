@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from tts_api.core.models import TextChunkingStrategy, TextProcessingOptions
-from tts_api.utils.text_processing import process_and_chunk_text
+from tts_api.services.text_processing import process_and_chunk_text
 
 # --- Test Data ---
 
@@ -160,7 +160,7 @@ class TestProcessAndChunkText:
         with pytest.raises(ValueError, match="Unknown chunking strategy: 'nonexistent_strategy'"):
             process_and_chunk_text("some text", options)
 
-    @patch('tts_api.utils.text_processing.get_segmenter')
+    @patch('tts_api.services.text_processing.get_segmenter')
     def test_language_option_is_passed_to_segmenter(self, mock_get_segmenter):
         """Check if the text_language option is correctly passed to the segmenter factory."""
         # Mock the segmenter to control its output and avoid downloading models
@@ -215,7 +215,7 @@ class TestProcessAndChunkTextEdgeCases:
         chunks = process_and_chunk_text(text, options)
         assert chunks == ["paragraph 1.", "paragraph 2."]
 
-    @patch('tts_api.utils.text_processing._chunk_sentences_balanced')
+    @patch('tts_api.services.text_processing._chunk_sentences_balanced')
     def test_paragraph_boundary_conditions_with_max_length(self, mock_balanced_chunker):
         """Test PARAGRAPH strategy's fallback logic right at the max_length boundary."""
         # Set a mock return value to prevent errors if it's called.

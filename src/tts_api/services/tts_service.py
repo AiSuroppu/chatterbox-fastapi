@@ -9,7 +9,7 @@ from typing import Union, List
 
 from tts_api.core.models import BaseTTSRequest
 from tts_api.tts_engines.base import AbstractTTSEngine
-from tts_api.utils.text_processing import process_and_chunk_text
+from tts_api.services.text_processing import process_and_chunk_text
 from tts_api.services.audio_processor import post_process_audio, get_speech_ratio
 
 def set_seed(seed: int):
