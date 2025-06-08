@@ -13,8 +13,10 @@ class ChatterboxParams(BaseModel):
 
 # --- Generic Request Component Models ---
 
-class SentenceBatchingStrategy(str, Enum):
-    RECURSIVE = "recursive"
+class TextChunkingStrategy(str, Enum):
+    PARAGRAPH = "paragraph"
+    BALANCED = "balanced"
+    GREEDY = "greedy"
     SIMPLE = "simple"
 
 class TextProcessingOptions(BaseModel):
@@ -22,11 +24,18 @@ class TextProcessingOptions(BaseModel):
     text_language: str = Field("en", description="Language code for sentence segmentation (e.g., 'en', 'de', 'es').")
     to_lowercase: bool = Field(True, description="Convert input text to lowercase.")
     remove_bracketed_text: bool = Field(False, description="Remove text in brackets [], parentheses (), or asterisks **.")
-    batching_strategy: SentenceBatchingStrategy = Field(
-        SentenceBatchingStrategy.RECURSIVE, 
-        description="'recursive': Group sentences intelligently up to max_chunk_length (Recommended). 'simple': Force-split text by max_chunk_length."
+    chunking_strategy: TextChunkingStrategy = Field(
+        TextChunkingStrategy.PARAGRAPH, 
+        description=(
+            "'paragraph': Keeps paragraphs whole, falling back to 'balanced' for long ones (Recommended). "
+            "'balanced': Optimally splits sentences for even chunk sizes. "
+            "'greedy': Groups sentences greedily (faster, less even). "
+            "'simple': Force-splits by character length."
+        )
     )
-    max_chunk_length: int = Field(300, ge=50, le=500, description="The maximum character length for any text chunk.")
+    shortness_penalty_factor: float = Field(2.0, ge=1.0, description="Factor to penalize short chunks in the 'balanced' strategy. Higher values avoid tiny chunks more aggressively.")
+    ideal_chunk_length: int = Field(300, ge=50, le=1000, description="The target character length for chunks. Used by 'balanced' strategy.")
+    max_chunk_length: int = Field(500, ge=50, le=1000, description="The absolute maximum character length for any text chunk.")
 
 class AudioNormalizationMethod(str, Enum):
     EBU = "ebu"

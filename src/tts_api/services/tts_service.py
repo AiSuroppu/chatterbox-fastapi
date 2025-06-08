@@ -74,7 +74,7 @@ def generate_speech_from_request(
     """
     text_chunks = process_and_chunk_text(
         text=req.text,
-        text_options=req.text_processing,
+        options=req.text_processing,
     )
 
     tmp_ref_file = None
