@@ -124,16 +124,16 @@ def _prepare_and_segment_sentences(text: str, options: TextProcessingOptions) ->
         text = re.sub(r'\[.*?\]', '', text)
         text = re.sub(r'\(.*?\)', '', text)
     
-    # --- Step 3: Text Normalization (NeMo) ---
-    if options.use_nemo_normalizer:
-        # NeMo converts numbers, currencies, dates, etc., to their spoken form.
-        normalizer = get_normalizer(options.text_language)
-        text = normalizer.normalize(text)
-    
-    # --- Step 4: Sentence Segmentation (pysbd) ---
+    # --- Step 3: Sentence Segmentation (pysbd) ---
     # pysbd works best on cased, properly punctuated text.
     segmenter = get_segmenter(options.text_language)
     sentences = segmenter.segment(text)
+
+    # --- Step 4: Text Normalization (NeMo) ---
+    if options.use_nemo_normalizer:
+        # NeMo converts numbers, currencies, dates, etc., to their spoken form.
+        normalizer = get_normalizer(options.text_language)
+        sentences = normalizer.normalize_list(sentences)
     
     # --- Step 5: Post-processing and Force Splitting ---
     final_sentence_units = []
