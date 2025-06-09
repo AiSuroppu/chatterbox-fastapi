@@ -161,8 +161,6 @@ def _prepare_and_segment_sentences(text: str, options: TextProcessingOptions) ->
             
     return final_sentence_units
 
-from typing import List, Sequence
-
 def _force_split_long_chunk(
     chunk: str,
     max_length: int,
