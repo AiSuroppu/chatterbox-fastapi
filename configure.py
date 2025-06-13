@@ -117,6 +117,10 @@ def main(engine_name, cuda_version_override):
         f.write("# The maximum number of text segments to process in a single batch for Chatterbox.\n")
         f.write("# Increase on high-VRAM GPUs for better throughput.\n")
         f.write("#CHATTERBOX_MAX_BATCH_SIZE=2\n")
+        f.write("# PyTorch 2.0+ model compilation mode for Chatterbox (e.g., 'default', 'reduce-overhead', 'max-autotune').\n")
+        f.write("# Can significantly speed up inference after a one-time warm-up cost.\n")
+        f.write("# Set to an empty string to disable compilation.\n")
+        f.write('CHATTERBOX_COMPILE_MODE=""\n\n')
 
     # --- Step 8: Pre-download required models ---
     print("8. Pre-downloading required models...")

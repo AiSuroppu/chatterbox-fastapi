@@ -21,7 +21,8 @@ class ChatterboxEngine(AbstractTTSEngine):
         if self._model is None:
             logging.info("Chatterbox model not loaded. Initializing...")
             try:
-                self._model = ChatterboxTTS.from_pretrained(device=settings.DEVICE)
+                compile_mode = settings.CHATTERBOX_COMPILE_MODE.strip() or None
+                self._model = ChatterboxTTS.from_pretrained(device=settings.DEVICE, compile_mode=compile_mode)
                 logging.info(f"Chatterbox model loaded on device: {settings.DEVICE}")
             except Exception as e:
                 logging.critical(f"Failed to load Chatterbox model: {e}", exc_info=True)

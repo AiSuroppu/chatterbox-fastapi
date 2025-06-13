@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # --- Chatterbox Specific Settings ---
     # The maximum number of text segments to process in a single batch for Chatterbox.
     CHATTERBOX_MAX_BATCH_SIZE: int = 2
+    # PyTorch 2.0+ model compilation mode for Chatterbox (e.g., 'default', 'reduce-overhead', 'max-autotune').
+    # Set to an empty string to disable compilation.
+    CHATTERBOX_COMPILE_MODE: str = ""
 
     class Config:
         env_file = ".env"
