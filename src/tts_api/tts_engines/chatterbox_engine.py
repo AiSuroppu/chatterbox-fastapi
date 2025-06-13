@@ -64,6 +64,7 @@ class ChatterboxEngine(AbstractTTSEngine):
                     exaggeration=params.exaggeration,
                     cfg_weight=params.cfg_weight,
                     temperature=params.temperature,
+                    use_analyzer=params.use_analyzer,
                 )
                 if not isinstance(waveform_batch, list):
                     waveform_batch = [waveform_batch]  # Ensure we always have a list

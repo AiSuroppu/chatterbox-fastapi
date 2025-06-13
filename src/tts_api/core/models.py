@@ -10,6 +10,7 @@ class ChatterboxParams(BaseModel):
     temperature: float = Field(0.8, ge=0.01, le=5.0, description="Generation temperature.")
     cfg_weight: float = Field(0.5, ge=0.0, le=1.0, description="CFG Weight.")
     disable_watermark: bool = Field(True, description="Disable Chatterbox's audio watermark.")
+    use_analyzer: bool = Field(False, description="Enable the alignment analyzer for improved quality and robustness. May fail on some inputs.")
 
 # --- Generic Request Component Models ---
 
