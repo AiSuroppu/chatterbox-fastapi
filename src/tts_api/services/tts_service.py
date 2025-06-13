@@ -6,12 +6,15 @@ import os
 import tempfile
 import logging
 from typing import Union, List
+from dataclasses import dataclass
+from collections import defaultdict
+from enum import Enum, auto
 
-from tts_api.core.config import settings
 from tts_api.core.models import BaseTTSRequest
 from tts_api.tts_engines.base import AbstractTTSEngine
 from tts_api.services.text_processing import process_and_chunk_text
 from tts_api.services.audio_processor import post_process_audio, get_speech_ratio
+from tts_api.services.validation import ALL_VALIDATORS, ValidationResult
 
 def set_seed(seed: int):
     torch.manual_seed(seed)
@@ -22,21 +25,31 @@ def set_seed(seed: int):
     np.random.seed(seed)
     logging.debug(f"Seed set to: {seed}")
 
-def _get_seed_for_generation(
-    req_seed: Union[int, List[int]],
-    candidate_idx: int,
-    chunk_idx: int = 0, # Included for signature compatibility, but unused
-) -> int:
-    """
-    Determines the seed for a specific generation task.
+class JobStatus(Enum):
+    """Represents the state of a single generation job."""
+    PENDING = auto()
+    SUCCESS = auto()
+    FAILED_FINAL = auto()
 
-    - If `req_seed` is a list, it uses the seed at `candidate_idx`. This list of
-      seeds is reused for each text chunk. If `best_of` exceeds the list length,
-      it falls back to random seeds.
-    - If `req_seed` is a single integer, it generates a deterministic seed based on
-      both the candidate index to ensure variation across the audio.
-    - A seed of 0 is always interpreted as "use a random seed".
-    """
+@dataclass
+class GenerationJob:
+    # Identifiers & Input
+    segment_idx: int
+    candidate_idx: int
+    text: str
+    initial_seed: int
+
+    # State Tracking
+    status: JobStatus = JobStatus.PENDING
+    attempt_count: int = 0
+    current_seed: int = 0
+    
+    # Results
+    waveform: torch.Tensor | None = None
+    score: float = 0.0
+
+def _get_initial_seed(req_seed: Union[int, List[int]], candidate_idx: int) -> int:
+    """Determines the seed for the FIRST attempt of a generation job."""
     if isinstance(req_seed, list):
         # Use the candidate index to pick from the seed list.
         # This list is re-used for every chunk.
@@ -67,19 +80,9 @@ def generate_speech_from_request(
     engine_params: 'BaseModel',
     ref_audio_data: bytes | None = None
 ) -> io.BytesIO:
-    """
-    Orchestrates TTS generation, delegating batching to the engine.
-    1. Prepares text segments by chunking the input string.
-    2. For each of `best_of` candidates:
-       - Passes the *entire list* of segments to the engine for generation.
-    3. Scores all generated candidates for each segment.
-    4. Selects the best candidate for each segment and concatenates them.
-    5. Post-processes the final combined audio.
-    """
     input_segments = process_and_chunk_text(
         text=req.text, options=req.text_processing
     )
-
     if not input_segments:
         raise ValueError("No text to synthesize after processing.")
 
@@ -94,36 +97,104 @@ def generate_speech_from_request(
                 ref_audio_path = tmp_ref_file.name
             logging.info(f"Using reference audio from temporary file: {ref_audio_path}")
 
-        num_segments = len(input_segments)
-        all_candidates = [[] for _ in range(num_segments)]
+        logging.info(f"Processing {len(input_segments)} text segments. Generating {req.best_of} candidate(s) per segment.")
 
-        logging.info(f"Processing {num_segments} text segments. Generating {req.best_of} candidate(s) per segment.")
+        # Phase 1: Initialization
+        # Pre-calculate one initial seed for each candidate generation pass.
+        # This ensures all segments of a single candidate share the same seed for the first attempt.
+        candidate_seeds = [_get_initial_seed(req.seed, j) for j in range(req.best_of)]
+        logging.info(f"Initial seeds for {req.best_of} candidate(s): {candidate_seeds}")
 
-        # For each 'best_of' candidate, generate audio for all segments.
-        for j in range(req.best_of):
-            seed = _get_seed_for_generation(req.seed, candidate_idx=j)
-            set_seed(seed)
-            logging.debug(f"Generating candidate #{j+1}/{req.best_of} for all segments with seed {seed}")
+        all_jobs = []
+        for i, segment_text in enumerate(input_segments):
+            for j in range(req.best_of):
+                initial_seed = candidate_seeds[j]  # Use the pre-calculated seed
+                all_jobs.append(GenerationJob(
+                    segment_idx=i, candidate_idx=j, text=segment_text, initial_seed=initial_seed
+                ))
 
-            # The engine is responsible for its own batching strategy.
-            # We pass the full list of segments here.
-            generated_waveforms = engine.generate(input_segments, engine_params, ref_audio_path=ref_audio_path)
+        # Phase 2: Multi-Pass Processing Loop
+        for attempt in range(req.max_retries + 1):
+            jobs_to_process = [job for job in all_jobs if job.status == JobStatus.PENDING]
+            if not jobs_to_process:
+                break
+            
+            logging.info(f"--- Processing attempt {attempt+1}/{req.max_retries+1}: {len(jobs_to_process)} jobs pending ---")
 
-            if len(generated_waveforms) != num_segments:
-                logging.error(f"Engine returned a mismatched number of waveforms. Expected {num_segments}, got {len(generated_waveforms)}. Skipping this candidate.")
-                continue
-
-            # Score each generated waveform and store it as a candidate for its respective segment.
-            for i, waveform in enumerate(generated_waveforms):
-                if waveform.numel() == 0:
-                    logging.warning(f"  Candidate for segment {i + 1} was empty.")
-                    continue
+            # Assign seeds for the current processing pass
+            if attempt == 0:
+                # On the first attempt, each job uses its pre-assigned initial seed.
+                for job in jobs_to_process:
+                    job.current_seed = job.initial_seed
+            else:
+                # For retries, generate a new random seed for EACH candidate that has pending jobs.
+                # All pending jobs for the SAME candidate will share this new seed, allowing them
+                # to be batched efficiently. This ensures different candidates get different seeds.
+                candidates_to_retry = sorted(list({job.candidate_idx for job in jobs_to_process}))
                 
-                score = get_speech_ratio(waveform, engine.sample_rate, req.post_processing)
-                candidate_data = {'waveform': waveform, 'score': score, 'seed': seed}
-                all_candidates[i].append(candidate_data)
+                # Generate one new seed per candidate needing a retry
+                candidate_retry_seeds = {
+                    cand_idx: random.randint(1, 2**32 - 1)
+                    for cand_idx in candidates_to_retry
+                }
+                
+                if candidate_retry_seeds:
+                    logging.info(f"Generated new retry seeds for {len(candidate_retry_seeds)} candidate(s): {candidate_retry_seeds}")
+                
+                # Assign the new per-candidate seeds to the corresponding jobs
+                for job in jobs_to_process:
+                    job.current_seed = candidate_retry_seeds[job.candidate_idx]
+            
+            jobs_by_seed = defaultdict(list)
+            for job in jobs_to_process:
+                jobs_by_seed[job.current_seed].append(job)
 
-        # Select the best candidate for each segment and build the final list of waveforms
+            for seed, job_group in jobs_by_seed.items():
+                set_seed(seed)
+                texts_to_generate = [job.text for job in job_group]
+                
+                # The service calls the engine with a list of texts; the engine handles its own batching.
+                generated_waveforms = engine.generate(
+                    texts_to_generate, 
+                    engine_params, 
+                    ref_audio_path=ref_audio_path
+                )
+
+                for i, job in enumerate(job_group):
+                    job.attempt_count += 1
+                    waveform = generated_waveforms[i]
+                    
+                    final_result = ValidationResult(is_ok=True)
+                    if waveform is None or waveform.numel() == 0:
+                        final_result = ValidationResult(is_ok=False, reason="Engine returned empty/None output")
+                    else:
+                        for validator in ALL_VALIDATORS:
+                            result = validator.is_valid(waveform, engine.sample_rate, job.text, req.validation_params)
+                            if not result.is_ok:
+                                final_result = result
+                                break
+                    
+                    if final_result.is_ok:
+                        job.status = JobStatus.SUCCESS
+                        job.waveform = waveform
+                        job.score = get_speech_ratio(waveform, engine.sample_rate, req.post_processing)
+                    elif job.attempt_count <= req.max_retries:
+                        logging.warning(f"Validation failed for chunk (seg={job.segment_idx}, cand={job.candidate_idx}, att={job.attempt_count}, seed={job.current_seed}): {final_result.reason}. Will retry.")
+
+        # Phase 3: Finalization & Assembly
+        final_failures = 0
+        for job in all_jobs:
+            if job.status == JobStatus.PENDING:
+                job.status = JobStatus.FAILED_FINAL
+                final_failures += 1
+        if final_failures > 0:
+            logging.error(f"{final_failures} jobs failed all {req.max_retries+1} attempts and will be excluded.")
+        
+        all_candidates = [[] for _ in range(len(input_segments))]
+        for job in all_jobs:
+            if job.status == JobStatus.SUCCESS:
+                all_candidates[job.segment_idx].append({'waveform': job.waveform, 'score': job.score, 'seed': job.initial_seed})
+
         final_waveform_list = []
         for i, segment_text in enumerate(input_segments):
             candidates_for_segment = all_candidates[i]
