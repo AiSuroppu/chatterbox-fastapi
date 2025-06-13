@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # LRU cache size for the pysbd Segmenter instances.
     PYSBD_CACHE_SIZE: int = 4
 
+    # --- Chatterbox Specific Settings ---
+    # The maximum number of text segments to process in a single batch for Chatterbox.
+    CHATTERBOX_MAX_BATCH_SIZE: int = 2
 
     class Config:
         env_file = ".env"

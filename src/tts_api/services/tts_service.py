@@ -7,6 +7,7 @@ import tempfile
 import logging
 from typing import Union, List
 
+from tts_api.core.config import settings
 from tts_api.core.models import BaseTTSRequest
 from tts_api.tts_engines.base import AbstractTTSEngine
 from tts_api.services.text_processing import process_and_chunk_text
@@ -23,8 +24,8 @@ def set_seed(seed: int):
 
 def _get_seed_for_generation(
     req_seed: Union[int, List[int]],
-    chunk_idx: int,
     candidate_idx: int,
+    chunk_idx: int = 0, # Included for signature compatibility, but unused
 ) -> int:
     """
     Determines the seed for a specific generation task.
@@ -52,7 +53,6 @@ def _get_seed_for_generation(
                     f"Using random seeds for remaining candidates."
                 )
             return random.randint(1, 2**32 - 1)
-
     else:  # req_seed is an int
         if req_seed == 0:
             # Use a fully random seed for each generation
@@ -68,65 +68,71 @@ def generate_speech_from_request(
     ref_audio_data: bytes | None = None
 ) -> io.BytesIO:
     """
-    Main service function to orchestrate TTS generation.
-    It processes text into chunks. For each chunk, it generates `best_of` candidates,
-    scores them, and picks the best one. The best chunks are then concatenated.
+    Orchestrates TTS generation, delegating batching to the engine.
+    1. Prepares text segments by chunking the input string.
+    2. For each of `best_of` candidates:
+       - Passes the *entire list* of segments to the engine for generation.
+    3. Scores all generated candidates for each segment.
+    4. Selects the best candidate for each segment and concatenates them.
+    5. Post-processes the final combined audio.
     """
-    text_chunks = process_and_chunk_text(
-        text=req.text,
-        options=req.text_processing,
+    input_segments = process_and_chunk_text(
+        text=req.text, options=req.text_processing
     )
+
+    if not input_segments:
+        raise ValueError("No text to synthesize after processing.")
 
     tmp_ref_file = None
     ref_audio_path = None
     final_waveform = None
+
     try:
-        # Create a temporary file for the reference audio if it exists
         if ref_audio_data:
-            tmp_ref_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            tmp_ref_file.write(ref_audio_data)
-            tmp_ref_file.close()  # Close the file so the engine can access it
-            ref_audio_path = tmp_ref_file.name
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_ref_file:
+                tmp_ref_file.write(ref_audio_data)
+                ref_audio_path = tmp_ref_file.name
             logging.info(f"Using reference audio from temporary file: {ref_audio_path}")
 
-        final_waveform_list = []
-        num_chunks = len(text_chunks)
-        logging.info(f"Processing text into {num_chunks} chunks. Generating {req.best_of} candidate(s) per chunk.")
+        num_segments = len(input_segments)
+        all_candidates = [[] for _ in range(num_segments)]
 
-        for i, chunk in enumerate(text_chunks):
-            if not chunk.strip():
+        logging.info(f"Processing {num_segments} text segments. Generating {req.best_of} candidate(s) per segment.")
+
+        # For each 'best_of' candidate, generate audio for all segments.
+        for j in range(req.best_of):
+            seed = _get_seed_for_generation(req.seed, candidate_idx=j)
+            set_seed(seed)
+            logging.debug(f"Generating candidate #{j+1}/{req.best_of} for all segments with seed {seed}")
+
+            # The engine is responsible for its own batching strategy.
+            # We pass the full list of segments here.
+            generated_waveforms = engine.generate(input_segments, engine_params, ref_audio_path=ref_audio_path)
+
+            if len(generated_waveforms) != num_segments:
+                logging.error(f"Engine returned a mismatched number of waveforms. Expected {num_segments}, got {len(generated_waveforms)}. Skipping this candidate.")
                 continue
 
-            logging.info(f"Processing chunk {i+1}/{num_chunks}: '{chunk[:50]}...'")
-            
-            chunk_candidates = []
-            for j in range(req.best_of):
-                seed = _get_seed_for_generation(
-                    req.seed,
-                    chunk_idx=i,
-                    candidate_idx=j,
-                )
-                set_seed(seed)
-                logging.debug(f"  Generating candidate {j+1}/{req.best_of} for chunk {i+1} with seed {seed}")
-                
-                candidate_waveform = engine.generate(chunk, engine_params, ref_audio_path=ref_audio_path)
-
-                if candidate_waveform.numel() == 0:
-                    logging.warning(f"  Candidate {j+1} for chunk {i+1} resulted in empty audio.")
+            # Score each generated waveform and store it as a candidate for its respective segment.
+            for i, waveform in enumerate(generated_waveforms):
+                if waveform.numel() == 0:
+                    logging.warning(f"  Candidate for segment {i + 1} was empty.")
                     continue
+                
+                score = get_speech_ratio(waveform, engine.sample_rate, req.post_processing)
+                candidate_data = {'waveform': waveform, 'score': score, 'seed': seed}
+                all_candidates[i].append(candidate_data)
 
-                # Score the candidate chunk
-                score = get_speech_ratio(candidate_waveform, engine.sample_rate, req.post_processing)
-                chunk_candidates.append({'waveform': candidate_waveform, 'score': score, 'seed': seed})
-                logging.debug(f"  Candidate {j+1} score (speech ratio): {score:.4f}")
+        # Select the best candidate for each segment and build the final list of waveforms
+        final_waveform_list = []
+        for i, segment_text in enumerate(input_segments):
+            candidates_for_segment = all_candidates[i]
+            if not candidates_for_segment:
+                raise ValueError(f"TTS failed to produce any valid candidates for segment {i+1}: '{segment_text[:50]}...'")
             
-            if not chunk_candidates:
-                raise ValueError(f"TTS generation failed to produce any valid candidates for chunk {i+1}: '{chunk[:50]}...'.")
-
-            # Select the best candidate for this chunk
-            best_chunk_candidate = max(chunk_candidates, key=lambda c: c['score'])
-            final_waveform_list.append(best_chunk_candidate['waveform'])
-            logging.info(f"  Selected best candidate for chunk {i+1} with score {best_chunk_candidate['score']:.4f} and seed {best_chunk_candidate['seed']}.")
+            best_candidate = max(candidates_for_segment, key=lambda c: c['score'])
+            final_waveform_list.append(best_candidate['waveform'])
+            logging.info(f"Selected best candidate for segment {i+1} (score: {best_candidate['score']:.4f}, seed: {best_candidate['seed']})")
 
         if not final_waveform_list:
             raise ValueError("TTS generation failed to produce any audio.")
@@ -135,10 +141,9 @@ def generate_speech_from_request(
         final_waveform = torch.cat(final_waveform_list, dim=1)
 
     finally:
-        # Ensure the temporary reference audio file is always cleaned up
-        if tmp_ref_file and os.path.exists(tmp_ref_file.name):
-            os.remove(tmp_ref_file.name)
-            logging.info(f"Cleaned up temporary reference audio file: {tmp_ref_file.name}")
+        if ref_audio_path and os.path.exists(ref_audio_path):
+            os.remove(ref_audio_path)
+            logging.info(f"Cleaned up temporary reference audio file: {ref_audio_path}")
 
     if final_waveform is None or final_waveform.numel() == 0:
         raise ValueError("TTS generation failed to produce any audio.")
