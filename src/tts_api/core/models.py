@@ -1,16 +1,7 @@
 from enum import Enum
 from pydantic import BaseModel, Field
-from typing import Literal, List, Union, Optional
+from typing import List, Union, Optional
 
-# --- Engine Specific Parameter Models ---
-
-class ChatterboxParams(BaseModel):
-    """Parameters specific to the Chatterbox TTS engine."""
-    exaggeration: float = Field(0.5, ge=0.0, le=2.0, description="Emotion exaggeration.")
-    temperature: float = Field(0.8, ge=0.01, le=5.0, description="Generation temperature.")
-    cfg_weight: float = Field(0.5, ge=0.0, le=1.0, description="CFG Weight.")
-    disable_watermark: bool = Field(True, description="Disable Chatterbox's audio watermark.")
-    use_analyzer: bool = Field(False, description="Enable the alignment analyzer for improved quality and robustness. May fail on some inputs.")
 
 # --- Generic Request Component Models ---
 
@@ -111,10 +102,21 @@ class BaseTTSRequest(BaseModel):
     seed: Union[int, List[int]] = Field(0, description="Random seed or a list of seeds. If a list is provided, seeds are used sequentially for each generation candidate. A seed of 0 means use a random seed.")
     best_of: int = Field(1, ge=1, le=10, description="Generate multiple speech outputs and automatically return the one with the highest speech-to-audio-duration ratio. Higher values take longer but can improve quality.")
     max_retries: int = Field(1, ge=0, le=10, description="Number of times to retry a failed or low-quality generation for a single text chunk.")
-    validation: ValidationOptions = Field(default_factory=ValidationOptions)
-    text_processing: TextProcessingOptions = Field(default_factory=TextProcessingOptions)
-    post_processing: PostProcessingOptions = Field(default_factory=PostProcessingOptions)
+    validation: ValidationOptions = ValidationOptions()
+    text_processing: TextProcessingOptions = TextProcessingOptions()
+    post_processing: PostProcessingOptions = PostProcessingOptions()
+
+
+# --- Engine Specific Parameter Models ---
+
+class ChatterboxParams(BaseModel):
+    """Parameters specific to the Chatterbox TTS engine."""
+    exaggeration: float = Field(0.5, ge=0.0, le=2.0, description="Emotion exaggeration.")
+    temperature: float = Field(0.8, ge=0.01, le=5.0, description="Generation temperature.")
+    cfg_weight: float = Field(0.5, ge=0.0, le=1.0, description="CFG Weight.")
+    disable_watermark: bool = Field(True, description="Disable Chatterbox's audio watermark.")
+    use_analyzer: bool = Field(False, description="Enable the alignment analyzer for improved quality and robustness. May fail on some inputs.")
 
 class ChatterboxTTSRequest(BaseTTSRequest):
     """The complete request model for the Chatterbox engine endpoint."""
-    chatterbox_params: ChatterboxParams = Field(default_factory=ChatterboxParams)
+    chatterbox_params: ChatterboxParams = ChatterboxParams()
