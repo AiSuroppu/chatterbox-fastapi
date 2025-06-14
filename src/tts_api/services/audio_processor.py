@@ -4,6 +4,7 @@ import io
 import torch
 import torchaudio
 import silero_vad
+from typing import List, Dict
 
 from tts_api.core.models import PostProcessingOptions, ExportFormat
 
@@ -32,23 +33,26 @@ def _get_resampler(from_rate: int, to_rate: int):
         )
     return _RESAMPLER_CACHE[(from_rate, to_rate)]
 
-def get_speech_ratio(
+def get_speech_timestamps(
     waveform: torch.Tensor,
     sample_rate: int,
     options: PostProcessingOptions
-) -> float:
+) -> List[Dict[str, int]]:
     """
-    Calculates the ratio of speech to total duration in a waveform using VAD.
+    Runs VAD on a waveform and returns speech timestamps.
+
+    The returned timestamps are in samples, scaled to the original `sample_rate`.
     """
     model = _get_vad_model()
+    mono_waveform = torch.mean(waveform, dim=0) if waveform.ndim > 1 else waveform
 
     if sample_rate != VAD_INTERNAL_SAMPLE_RATE:
         resampler = _get_resampler(sample_rate, VAD_INTERNAL_SAMPLE_RATE)
-        vad_input_waveform = resampler(waveform)
+        vad_input_waveform = resampler(mono_waveform)
     else:
-        vad_input_waveform = waveform
+        vad_input_waveform = mono_waveform
 
-    speech_timestamps = silero_vad.get_speech_timestamps(
+    timestamps_16k = silero_vad.get_speech_timestamps(
         vad_input_waveform,
         model,
         sampling_rate=VAD_INTERNAL_SAMPLE_RATE,
@@ -57,17 +61,40 @@ def get_speech_ratio(
         min_silence_duration_ms=options.vad_min_silence_ms,
         speech_pad_ms=options.vad_speech_pad_ms
     )
-    
-    if not speech_timestamps:
+
+    if not timestamps_16k:
+        return []
+
+    # Scale timestamps back to the original sample rate
+    scale_factor = sample_rate / VAD_INTERNAL_SAMPLE_RATE
+    original_rate_timestamps = [
+        {'start': int(ts['start'] * scale_factor), 'end': int(ts['end'] * scale_factor)}
+        for ts in timestamps_16k
+    ]
+    return original_rate_timestamps
+
+def calculate_speech_ratio_from_timestamps(
+    speech_timestamps: List[Dict[str, int]],
+    total_samples: int
+) -> float:
+    """Calculates speech ratio from pre-computed VAD timestamps."""
+    if not speech_timestamps or total_samples == 0:
         return 0.0
 
     total_speech_samples = sum(s['end'] - s['start'] for s in speech_timestamps)
-    total_samples = vad_input_waveform.shape[-1]
-    
-    if total_samples == 0:
-        return 0.0
-
     return total_speech_samples / total_samples
+
+def get_speech_ratio(
+    waveform: torch.Tensor,
+    sample_rate: int,
+    options: PostProcessingOptions
+) -> float:
+    """
+    Calculates the ratio of speech to total duration in a waveform using VAD.
+    """
+    timestamps = get_speech_timestamps(waveform, sample_rate, options)
+    return calculate_speech_ratio_from_timestamps(timestamps, waveform.shape[-1])
+
 
 def apply_vad_denoising(
     waveform: torch.Tensor,
@@ -78,39 +105,20 @@ def apply_vad_denoising(
     Applies VAD to a waveform tensor to remove noise in silent segments.
     This version correctly handles different input sample rates by scaling timestamps.
     """
-    model = _get_vad_model()
-
-    # The silero-vad package fails on sample rates like 24kHz, so we must do this manually.
-    if sample_rate != VAD_INTERNAL_SAMPLE_RATE:
-        resampler = _get_resampler(sample_rate, VAD_INTERNAL_SAMPLE_RATE)
-        vad_input_waveform = resampler(waveform)
-    else:
-        vad_input_waveform = waveform
-
-    # The package function takes the original waveform and sample rate.
-    # It performs resampling to 16kHz internally.
-    speech_timestamps = silero_vad.get_speech_timestamps(
-        vad_input_waveform,
-        model,
-        sampling_rate=VAD_INTERNAL_SAMPLE_RATE, # We ALWAYS use the internal rate here
-        threshold=options.vad_threshold,
-        min_silence_duration_ms=options.vad_min_silence_ms,
-        speech_pad_ms=options.vad_speech_pad_ms
-    )
+    # Use the centralized helper to get speech timestamps in the correct sample rate
+    speech_timestamps = get_speech_timestamps(waveform, sample_rate, options)
 
     # If no speech is detected, return pure silence.
     if not speech_timestamps:
         return torch.zeros_like(waveform)
     
-    # Scale timestamps and apply to the ORIGINAL waveform
-    scale_factor = sample_rate / VAD_INTERNAL_SAMPLE_RATE
     output_waveform = torch.zeros_like(waveform)
     fade_samples = int((options.vad_fade_ms / 1000) * sample_rate)
 
     for segment in speech_timestamps:
-        # Apply the scale factor to get indices for the original waveform
-        start_sample = int(segment['start'] * scale_factor)
-        end_sample = int(segment['end'] * scale_factor)
+        # Timestamps are already scaled for the original waveform
+        start_sample = segment['start']
+        end_sample = segment['end']
         
         # We copy from the ORIGINAL high-quality waveform
         segment_to_copy = waveform[..., start_sample:end_sample].clone()
@@ -151,6 +159,11 @@ def post_process_audio(
     if processed_waveform.ndim == 1:
         processed_waveform = processed_waveform.unsqueeze(0)
     
+    # Handle empty waveform after processing
+    if processed_waveform.numel() == 0:
+        logging.warning("Waveform is empty after processing, returning empty audio.")
+        return io.BytesIO()
+
     # ffmpeg expects interleaved PCM data
     raw_audio_bytes = processed_waveform.numpy().tobytes()
 

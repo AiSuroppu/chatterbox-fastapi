@@ -87,6 +87,19 @@ class PostProcessingOptions(BaseModel):
     normalize_method: AudioNormalizationMethod = Field(AudioNormalizationMethod.EBU, description="Normalization method.")
     normalize_level: float = Field(-18.0, ge=-70.0, le=-5.0, description="EBU Target Integrated Loudness (LUFS).")
 
+    lead_in_silence_ms: Optional[int] = Field(
+        None, ge=0, le=10000, description=(
+            "Desired duration of silence (in milliseconds) at the beginning of the final audio. "
+            "If set, this will override any existing silence from the model or VAD. "
+            "If left as null (the default), the original lead-in silence is preserved (after VAD if enabled). "
+            "A value of 0 will trim all lead-in silence."))
+    lead_out_silence_ms: Optional[int] = Field(
+        None, ge=0, le=10000, description=(
+            "Desired duration of silence (in milliseconds) at the end of the final audio. "
+            "If set, this will override any existing silence from the model or VAD. "
+            "If left as null (the default), the original lead-out silence is preserved (after VAD if enabled). "
+            "A value of 0 will trim all lead-out silence."))
+
     export_format: ExportFormat = Field(ExportFormat.MP3, description="Final audio format.")
 
 

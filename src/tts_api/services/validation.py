@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 
 from tts_api.core.models import ValidationParams, PostProcessingOptions
-from tts_api.services.audio_processor import _get_vad_model, VAD_INTERNAL_SAMPLE_RATE, _get_resampler, silero_vad
+# Import the new centralized VAD function
+from tts_api.services.audio_processor import get_speech_timestamps as run_vad_on_waveform
 
 @dataclass
 class ValidationResult:
@@ -23,35 +24,26 @@ class ValidationContext:
     validation_params: ValidationParams
     post_processing_params: PostProcessingOptions
     language: str
+    _precomputed_vad_timestamps: Optional[List[Dict]] = None
 
     _vad_results: Optional[Tuple[List[Dict], torch.Tensor]] = None
     _filtered_speech_segments: Optional[List[Dict]] = None
 
     def _run_vad_once(self):
-        if self._vad_results is not None: return
-        
+        if self._vad_results is not None:
+            return
+
+        if self._precomputed_vad_timestamps is not None:
+            logging.debug("Using pre-computed VAD timestamps for validation.")
+            self._vad_results = (self._precomputed_vad_timestamps, None)
+            return
+
         logging.debug("Running VAD transformation for validation context...")
-        model = _get_vad_model()
-        mono_waveform = torch.mean(self.original_waveform, dim=0) if self.original_waveform.ndim > 1 else self.original_waveform
-
-        if self.sample_rate != VAD_INTERNAL_SAMPLE_RATE:
-            resampler = _get_resampler(self.sample_rate, VAD_INTERNAL_SAMPLE_RATE)
-            vad_input = resampler(mono_waveform)
-        else:
-            vad_input = mono_waveform
-
-        vad_timestamps = silero_vad.get_speech_timestamps(
-            vad_input, model, sampling_rate=VAD_INTERNAL_SAMPLE_RATE,
-            threshold=self.post_processing_params.vad_threshold,
-            min_speech_duration_ms=self.post_processing_params.vad_min_speech_ms,
-            min_silence_duration_ms=self.post_processing_params.vad_min_silence_ms,
-            speech_pad_ms=self.post_processing_params.vad_speech_pad_ms,
+        # Use the centralized function from audio_processor
+        timestamps = run_vad_on_waveform(
+            self.original_waveform, self.sample_rate, self.post_processing_params
         )
-        
-        scale_factor = self.sample_rate / VAD_INTERNAL_SAMPLE_RATE
-        initial_segments = [{'start': int(ts['start'] * scale_factor), 'end': int(ts['end'] * scale_factor)} for ts in vad_timestamps]
-        
-        self._vad_results = (initial_segments, None) # Don't compute processed waveform unless needed
+        self._vad_results = (timestamps, None)
 
     @property
     def initial_speech_segments(self) -> List[Dict]:
@@ -232,7 +224,6 @@ class SpectralCentroidValidator(AbstractValidator):
         
         std_dev = _calculate_spectral_centroid_std_dev(context)
 
-        # If it could not be calculated, we cannot fail the check.
         if std_dev is None:
             return ValidationResult(is_ok=True)
             
@@ -250,9 +241,13 @@ QUALITY_VALIDATORS = [ClippingValidator(), SpectralCentroidValidator()]
 
 def run_validation_pipeline(
     waveform: torch.Tensor, sample_rate: int, text_chunk: str,
-    validation_params: ValidationParams, post_processing_params: PostProcessingOptions, language: str
+    validation_params: ValidationParams, post_processing_params: PostProcessingOptions, language: str,
+    vad_speech_timestamps: Optional[List[Dict]] = None
 ) -> ValidationResult:
-    context = ValidationContext(waveform, sample_rate, text_chunk, validation_params, post_processing_params, language)
+    context = ValidationContext(
+        waveform, sample_rate, text_chunk, validation_params, post_processing_params,
+        language, _precomputed_vad_timestamps=vad_speech_timestamps
+    )
     
     for v_list in [PRE_FILTER_VALIDATORS, POST_FILTER_VALIDATORS, QUALITY_VALIDATORS]:
         for validator in v_list:

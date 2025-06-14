@@ -5,16 +5,15 @@ import io
 import os
 import tempfile
 import logging
-from typing import Union, List
+from typing import Union, List, Optional, Dict
 from dataclasses import dataclass
 from collections import defaultdict
 from enum import Enum, auto
 
-from tts_api.core.models import BaseTTSRequest
+from tts_api.core.models import BaseTTSRequest, PostProcessingOptions
 from tts_api.tts_engines.base import AbstractTTSEngine
-# Updated imports to include the new structured text chunks
 from tts_api.services.text_processing import process_and_chunk_text, TextChunk, BoundaryType
-from tts_api.services.audio_processor import post_process_audio, get_speech_ratio
+from tts_api.services.audio_processor import post_process_audio, get_speech_timestamps, calculate_speech_ratio_from_timestamps
 from tts_api.services.validation import run_validation_pipeline, ValidationResult
 
 def set_seed(seed: int):
@@ -33,6 +32,15 @@ class JobStatus(Enum):
     FAILED_FINAL = auto()
 
 @dataclass
+class GeneratedSegment:
+    """Holds the result of a single successful audio generation for a text chunk."""
+    waveform: torch.Tensor
+    sample_rate: int
+    # Pre-computed VAD results to avoid re-calculation
+    vad_speech_timestamps: List[Dict[str, int]]
+    score: float
+
+@dataclass
 class GenerationJob:
     # Identifiers & Input
     segment_idx: int
@@ -46,8 +54,8 @@ class GenerationJob:
     current_seed: int = 0
     
     # Results
-    waveform: torch.Tensor | None = None
-    score: float = 0.0
+    result: Optional[GeneratedSegment] = None
+
 
 def _get_initial_seed(req_seed: Union[int, List[int]], candidate_idx: int) -> int:
     """Determines the seed for the FIRST attempt of a generation job."""
@@ -75,13 +83,106 @@ def _get_initial_seed(req_seed: Union[int, List[int]], candidate_idx: int) -> in
             # Create a deterministic but unique seed for each candidate.
             return req_seed + candidate_idx * 1000
 
+def _trim_waveform_with_vad(segment: GeneratedSegment) -> torch.Tensor:
+    """Trims silence from a waveform using its pre-computed VAD timestamps."""
+    if not segment.vad_speech_timestamps:
+        # If VAD found no speech, return an empty tensor.
+        num_channels = segment.waveform.shape[0] if segment.waveform.ndim > 1 else 1
+        return torch.zeros((num_channels, 0), dtype=segment.waveform.dtype, device=segment.waveform.device)
+    
+    start_sample = segment.vad_speech_timestamps[0]['start']
+    end_sample = segment.vad_speech_timestamps[-1]['end']
+    return segment.waveform[..., start_sample:end_sample]
+
+def _assemble_final_waveform(
+    final_segments: List[GeneratedSegment],
+    input_segment_info: List[TextChunk],
+    post_processing_opts: PostProcessingOptions,
+    sample_rate: int
+) -> torch.Tensor:
+    """Assembles the final audio from generated segments, handling silence and trimming."""
+    if not final_segments:
+        return torch.zeros((1, 0))
+
+    final_audio_parts = []
+    num_channels = final_segments[0].waveform.shape[0] if final_segments[0].waveform.ndim > 1 else 1
+    dtype = final_segments[0].waveform.dtype
+    device = final_segments[0].waveform.device
+
+    # Handle lead-in silence for the very first segment
+    if post_processing_opts.lead_in_silence_ms is not None:
+        lead_in_samples = int((post_processing_opts.lead_in_silence_ms / 1000) * sample_rate)
+        if lead_in_samples > 0:
+            final_audio_parts.append(torch.zeros((num_channels, lead_in_samples), dtype=dtype, device=device))
+
+    for i, segment in enumerate(final_segments):
+        # Determine the core waveform to use for this segment
+        is_first_segment = (i == 0)
+        is_last_segment = (i == len(final_segments) - 1)
+        
+        # If user is controlling lead-in/out, we trim the VAD-detected silence from the edges.
+        # Otherwise, if trim_segment_silence is true, we still trim it.
+        # If trim_segment_silence is false, we keep the original waveform unless a lead-in/out override forces a trim.
+        
+        waveform_to_process = segment.waveform
+        
+        # Trim start if it's the first segment and lead-in is being set
+        if is_first_segment and post_processing_opts.lead_in_silence_ms is not None:
+            if segment.vad_speech_timestamps:
+                start_sample = segment.vad_speech_timestamps[0]['start']
+                waveform_to_process = waveform_to_process[..., start_sample:]
+        
+        # Trim end if it's the last segment and lead-out is being set
+        if is_last_segment and post_processing_opts.lead_out_silence_ms is not None:
+            if segment.vad_speech_timestamps:
+                end_sample = segment.vad_speech_timestamps[-1]['end']
+                waveform_to_process = waveform_to_process[..., :end_sample]
+
+        # For inter-segment handling, trim both ends if requested.
+        if post_processing_opts.trim_segment_silence:
+            # For the first segment, only trim end (start is handled by lead-in logic)
+            if is_first_segment and not is_last_segment:
+                if segment.vad_speech_timestamps:
+                    waveform_to_process = waveform_to_process[..., :segment.vad_speech_timestamps[-1]['end']]
+            # For the last segment, only trim start (end is handled by lead-out logic)
+            elif is_last_segment and not is_first_segment:
+                if segment.vad_speech_timestamps:
+                     waveform_to_process = waveform_to_process[..., segment.vad_speech_timestamps[0]['start']:]
+            # For middle segments, trim both ends
+            elif not is_first_segment and not is_last_segment:
+                waveform_to_process = _trim_waveform_with_vad(segment)
+
+        final_audio_parts.append(waveform_to_process)
+        
+        # Add inter-segment silence if this is not the last segment
+        if not is_last_segment:
+            segment_info = input_segment_info[i]
+            pause_ms = post_processing_opts.inter_segment_silence_fallback_ms
+            if segment_info.boundary_type == BoundaryType.PARAGRAPH:
+                pause_ms = post_processing_opts.inter_segment_silence_paragraph_ms
+            elif segment_info.boundary_type == BoundaryType.SENTENCE:
+                pause_ms = post_processing_opts.inter_segment_silence_sentence_ms
+
+            if pause_ms > 0:
+                silence_samples = int((pause_ms / 1000) * sample_rate)
+                final_audio_parts.append(torch.zeros((num_channels, silence_samples), dtype=dtype, device=device))
+                logging.info(f"Inserting {pause_ms}ms of '{segment_info.boundary_type.name}' silence after segment {i+1}.")
+
+    # Handle lead-out silence for the very last segment
+    if post_processing_opts.lead_out_silence_ms is not None:
+        lead_out_samples = int((post_processing_opts.lead_out_silence_ms / 1000) * sample_rate)
+        if lead_out_samples > 0:
+            final_audio_parts.append(torch.zeros((num_channels, lead_out_samples), dtype=dtype, device=device))
+
+    return torch.cat([p for p in final_audio_parts if p.numel() > 0], dim=1) if final_audio_parts else torch.zeros((num_channels, 0), dtype=dtype, device=device)
+
+
 def generate_speech_from_request(
     req: BaseTTSRequest,
     engine: AbstractTTSEngine,
     engine_params: 'BaseModel',
     ref_audio_data: bytes | None = None
 ) -> io.BytesIO:
-    # The chunker now returns a list of structured TextChunk objects.
     input_segments: List[TextChunk] = process_and_chunk_text(
         text=req.text, options=req.text_processing
     )
@@ -169,19 +270,27 @@ def generate_speech_from_request(
                     if waveform is None or waveform.numel() == 0:
                         final_result = ValidationResult(is_ok=False, reason="Engine returned empty/None output")
                     else:
+                        # Run VAD once and pass results to validation and scoring
+                        vad_timestamps = get_speech_timestamps(waveform, engine.sample_rate, req.post_processing)
                         final_result = run_validation_pipeline(
                             waveform=waveform,
                             sample_rate=engine.sample_rate,
                             text_chunk=job.text,
                             validation_params=req.validation_params,
-                            post_processing_params=req.post_processing, # Pass post-processing params
-                            language=req.text_processing.text_language
+                            post_processing_params=req.post_processing,
+                            language=req.text_processing.text_language,
+                            vad_speech_timestamps=vad_timestamps
                         )
                     
                     if final_result.is_ok:
                         job.status = JobStatus.SUCCESS
-                        job.waveform = waveform
-                        job.score = get_speech_ratio(waveform, engine.sample_rate, req.post_processing)
+                        score = calculate_speech_ratio_from_timestamps(vad_timestamps, waveform.shape[-1])
+                        job.result = GeneratedSegment(
+                            waveform=waveform,
+                            sample_rate=engine.sample_rate,
+                            vad_speech_timestamps=vad_timestamps,
+                            score=score
+                        )
                     elif job.attempt_count <= req.max_retries:
                         logging.warning(f"Validation failed for chunk (seg={job.segment_idx}, cand={job.candidate_idx}, att={job.attempt_count}, seed={job.current_seed}): {final_result.reason}. Will retry.")
 
@@ -194,59 +303,28 @@ def generate_speech_from_request(
         if final_failures > 0:
             logging.error(f"{final_failures} jobs failed all {req.max_retries+1} attempts and will be excluded.")
         
-        all_candidates = [[] for _ in range(len(input_segments))]
-        for job in all_jobs:
-            if job.status == JobStatus.SUCCESS:
-                all_candidates[job.segment_idx].append({'waveform': job.waveform, 'score': job.score, 'seed': job.initial_seed})
-
-        final_waveform_list = []
+        successful_jobs = [job for job in all_jobs if job.status == JobStatus.SUCCESS]
+        
+        final_segments = []
         for i, segment_info in enumerate(input_segments):
-            candidates_for_segment = all_candidates[i]
+            candidates_for_segment = [job for job in successful_jobs if job.segment_idx == i]
             if not candidates_for_segment:
                 raise ValueError(f"TTS failed to produce any valid candidates for segment {i+1}: '{segment_info.text[:50]}...'")
             
-            best_candidate = max(candidates_for_segment, key=lambda c: c['score'])
-            final_waveform_list.append(best_candidate['waveform'])
-            logging.info(f"Selected best candidate for segment {i+1} (score: {best_candidate['score']:.4f}, seed: {best_candidate['seed']})")
+            best_job = max(candidates_for_segment, key=lambda j: j.result.score)
+            final_segments.append(best_job.result)
+            logging.info(f"Selected best candidate for segment {i+1} (score: {best_job.result.score:.4f}, seed: {best_job.initial_seed})")
 
-        if not final_waveform_list:
+        if not final_segments:
             raise ValueError("TTS generation failed to produce any audio.")
 
-        # Final audio assembly
-        final_audio_parts = []
-        
-        def trim_waveform(wf: torch.Tensor, threshold: float = 1e-4) -> torch.Tensor:
-            """Trims silence from the beginning and end of a waveform."""
-            if wf.ndim == 1: wf = wf.unsqueeze(0)
-            non_silent_indices = torch.where(wf.abs() > threshold)[-1]
-            if non_silent_indices.numel() == 0:
-                return torch.zeros((wf.shape[0], 0), dtype=wf.dtype) # Return empty tensor if all silent
-            start, end = non_silent_indices.min().item(), non_silent_indices.max().item()
-            return wf[..., start:end+1]
-
-        for i, waveform in enumerate(final_waveform_list):
-            processed_waveform = trim_waveform(waveform) if req.post_processing.trim_segment_silence else waveform
-            final_audio_parts.append(processed_waveform)
-
-            # Add inter-segment silence if this is not the last segment
-            if i < len(final_waveform_list) - 1:
-                segment_info = input_segments[i]
-                pause_ms = 0
-                if segment_info.boundary_type == BoundaryType.PARAGRAPH:
-                    pause_ms = req.post_processing.inter_segment_silence_paragraph_ms
-                elif segment_info.boundary_type == BoundaryType.SENTENCE:
-                    pause_ms = req.post_processing.inter_segment_silence_sentence_ms
-                else: # HARD_LIMIT
-                    pause_ms = req.post_processing.inter_segment_silence_fallback_ms
-
-                if pause_ms > 0:
-                    num_channels = waveform.shape[0] if waveform.ndim > 1 else 1
-                    silence_samples = int((pause_ms / 1000) * engine.sample_rate)
-                    silence_tensor = torch.zeros((num_channels, silence_samples), dtype=waveform.dtype)
-                    final_audio_parts.append(silence_tensor)
-                    logging.info(f"Inserting {pause_ms}ms of '{segment_info.boundary_type.name}' silence after segment {i+1}.")
-
-        final_waveform = torch.cat(final_audio_parts, dim=1)
+        # Use the new assembly helper function
+        final_waveform = _assemble_final_waveform(
+            final_segments=final_segments,
+            input_segment_info=input_segments,
+            post_processing_opts=req.post_processing,
+            sample_rate=engine.sample_rate
+        )
 
     finally:
         if ref_audio_path and os.path.exists(ref_audio_path):
@@ -254,9 +332,8 @@ def generate_speech_from_request(
             logging.info(f"Cleaned up temporary reference audio file: {ref_audio_path}")
 
     if final_waveform is None or final_waveform.numel() == 0:
-        raise ValueError("TTS generation failed to produce any audio.")
+        raise ValueError("TTS generation failed to produce any final audio after assembly.")
 
-    # Post-process ONLY the complete, final waveform
     audio_buffer = post_process_audio(
         final_waveform,
         engine.sample_rate,
