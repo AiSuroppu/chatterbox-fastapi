@@ -139,7 +139,7 @@ async def get_engine_config(engine_name: str):
 async def generate_speech(
     engine_name: str,
     req: BaseTTSRequest = Depends(dynamic_request_parser()),
-    ref_audio: Optional[UploadFile] = File(None, description="Reference audio file (e.g., WAV/MP3), required by some engines like 'chatterbox'.")
+    ref_audio: Optional[UploadFile] = File(None, description="Reference audio file (e.g., WAV/MP3), required by some engines.")
 ):
     """
     Generate speech from text using the specified TTS engine.
@@ -148,6 +148,9 @@ async def generate_speech(
     - **req_json**: A form field containing the JSON payload for the request. 
       Use the `/engines/{engine_name}/config` endpoint to get a template.
     - **ref_audio**: A file upload, required for voice cloning engines.
+    
+    Some engines may return engine-specific data in the `X-Generation-Metadata`
+    response header as a JSON string.
     """
     if engine_name not in settings.ENABLED_MODELS:
         raise HTTPException(
@@ -157,15 +160,11 @@ async def generate_speech(
 
     try:
         engine_def = ENGINE_REGISTRY[engine_name]
-        
-        # Dynamically get the engine-specific parameters object using the field name
-        # from our registry. This is the key to making the service call generic.
         engine_params = getattr(req, engine_def.param_field_name)
 
         ref_audio_data = await ref_audio.read() if ref_audio else None
 
-        # The tts_service is already generic, so we can call it directly.
-        audio_buffer = generate_speech_from_request(
+        synthesis_result = generate_speech_from_request(
             req=req, 
             engine=engine_def.instance, 
             engine_params=engine_params,
@@ -177,7 +176,14 @@ async def generate_speech(
             "application/octet-stream"
         )
         
-        return StreamingResponse(audio_buffer, media_type=media_type)
+        # Prepare the response and add the generic metadata header if it exists
+        response = StreamingResponse(synthesis_result.audio_buffer, media_type=media_type)
+        if synthesis_result.metadata:
+            metadata_json = json.dumps(synthesis_result.metadata)
+            response.headers["X-Generation-Metadata"] = metadata_json
+            logging.info(f"Returning generation metadata in header: {metadata_json}")
+        
+        return response
 
     except ValueError as ve:
         logging.warning(f"Bad request for engine '{engine_name}': {ve}")

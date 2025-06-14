@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tts-api-wrapper"
-version = "1.0.0"
+version = "1.0.1"
 description = "A modular FastAPI wrapper for running various open-source TTS engines."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -24,7 +24,8 @@ dependencies = [
     "pysbd",
     "nemo_text_processing",
     "python-multipart",
-    "pyphen"
+    "pyphen",
+    "cachetools"
 ]
 
 [project.urls]

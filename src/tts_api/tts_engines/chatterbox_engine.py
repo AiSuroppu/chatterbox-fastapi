@@ -1,6 +1,10 @@
 import torch
 import logging
-from typing import List
+import hashlib
+import tempfile
+import os
+from typing import List, Optional, Tuple, Dict, Any
+from cachetools import LRUCache
 from chatterbox.tts import ChatterboxTTS
 
 from tts_api.core.config import settings
@@ -14,20 +18,93 @@ def _noop_watermark(wav, sample_rate):
 
 class ChatterboxEngine(AbstractTTSEngine):
     def __init__(self):
-        self._model: ChatterboxTTS | None = None
+        self._model: Optional[ChatterboxTTS] = None
+        self._voice_cache: Optional[LRUCache] = None
         self.name = "chatterbox"
 
     def load_model(self):
         if self._model is None:
             logging.info("Chatterbox model not loaded. Initializing...")
             try:
+                cache_size = settings.CHATTERBOX_VOICE_CACHE_SIZE
+                if cache_size > 0:
+                    self._voice_cache = LRUCache(maxsize=cache_size)
+                    logging.info(f"Chatterbox voice cache enabled with size {cache_size}.")
+                
                 compile_mode = settings.CHATTERBOX_COMPILE_MODE.strip() or None
                 self._model = ChatterboxTTS.from_pretrained(device=settings.DEVICE, compile_mode=compile_mode)
                 logging.info(f"Chatterbox model loaded on device: {settings.DEVICE}")
             except Exception as e:
                 logging.critical(f"Failed to load Chatterbox model: {e}", exc_info=True)
                 raise
+
+    def _create_embedding_from_data(self, ref_audio_data: bytes, exaggeration: float):
+        """Helper to create a voice embedding from raw audio bytes."""
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            tmp_file.write(ref_audio_data)
+            tmp_filepath = tmp_file.name
+        try:
+            embedding = self._model.create_voice_embedding(
+                wav_fpath=tmp_filepath,
+                exaggeration=exaggeration
+            )
+            return embedding
+        finally:
+            os.remove(tmp_filepath)
     
+    def prepare_generation(
+        self,
+        params: ChatterboxParams,
+        ref_audio_data: Optional[bytes]
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Prepares the voice embedding for generation, utilizing a cache if enabled.
+        This method ensures `generate` always receives a pre-computed embedding.
+        """
+        if self._model is None:
+            raise RuntimeError("Model is not loaded yet.")
+
+        generation_kwargs = {}
+        response_metadata = {}
+
+        # First, try to use a token if caching is enabled
+        if self._voice_cache is not None and params.voice_cache_token:
+            cached_embedding = self._voice_cache.get(params.voice_cache_token)
+            if cached_embedding:
+                logging.info(f"Used cached voice with token: {params.voice_cache_token}")
+                generation_kwargs["voice_embedding_cache"] = cached_embedding
+                return generation_kwargs, response_metadata
+            else:
+                logging.warning(f"Invalid or expired voice_cache_token: {params.voice_cache_token}. Will generate a new voice if audio is provided.")
+
+        # If no valid token, audio data is required to proceed.
+        if not ref_audio_data:
+            raise ValueError("Chatterbox requires reference audio when a valid voice_cache_token is not provided.")
+
+        # Create the embedding, either for caching or for one-time use.
+        if self._voice_cache is not None:
+            # Caching is enabled: create, cache, and return a token
+            audio_hash = hashlib.sha256(ref_audio_data).hexdigest()
+            token = f"{audio_hash}-{params.exaggeration}"
+
+            if token in self._voice_cache:
+                embedding = self._voice_cache.get(token)
+                logging.info(f"Found matching voice in cache for hash/exaggeration. Reusing token: {token}")
+            else:
+                logging.info(f"Creating and caching new voice embedding with token: {token}")
+                embedding = self._create_embedding_from_data(ref_audio_data, params.exaggeration)
+                self._voice_cache[token] = embedding
+            
+            response_metadata["voice_cache_token"] = token
+            generation_kwargs["voice_embedding_cache"] = embedding
+        else:
+            # Caching is disabled: create a one-time embedding
+            logging.info("Voice cache disabled. Creating a temporary voice embedding.")
+            embedding = self._create_embedding_from_data(ref_audio_data, params.exaggeration)
+            generation_kwargs["voice_embedding_cache"] = embedding
+
+        return generation_kwargs, response_metadata
+
     @property
     def sample_rate(self) -> int:
         if self._model is None:
@@ -38,33 +115,29 @@ class ChatterboxEngine(AbstractTTSEngine):
         if self._model is None:
             raise RuntimeError("Cannot generate audio, model is not loaded.")
         
-        ref_audio_path = kwargs.get("ref_audio_path")
-        if not ref_audio_path:
-            raise ValueError("Chatterbox engine requires a reference audio path for generation.")
+        voice_embedding_cache = kwargs.get("voice_embedding_cache")
+        if not voice_embedding_cache:
+            # This should not happen if prepare_generation is called correctly.
+            raise ValueError("`generate` was called without a `voice_embedding_cache`. This indicates a service-layer error.")
 
         original_watermark_method = None
-        if params.disable_watermark:
-            logging.debug("Attempting to disable watermark via monkey-patch...")
-            original_watermark_method = self._model.watermarker.apply_watermark
-            self._model.watermarker.apply_watermark = _noop_watermark
-        
         try:
+            if params.disable_watermark:
+                original_watermark_method = self._model.watermarker.apply_watermark
+                self._model.watermarker.apply_watermark = _noop_watermark
+            
             all_waveforms = []
-            max_batch_size = settings.CHATTERBOX_MAX_BATCH_SIZE
-            num_chunks = len(text_chunks)
-
-            for i in range(0, num_chunks, max_batch_size):
-                batch = text_chunks[i:i + max_batch_size]
+            for i in range(0, len(text_chunks), settings.CHATTERBOX_MAX_BATCH_SIZE):
+                batch = text_chunks[i:i + settings.CHATTERBOX_MAX_BATCH_SIZE]
                 logging.debug(f"  Engine processing batch of size {len(batch)}")
-                
-                # The underlying library's generate method handles the batch
                 waveform_batch = self._model.generate(
                     text=batch,
-                    audio_prompt_path=ref_audio_path,
+                    audio_prompt_path=None, # Explicitly set to None
                     exaggeration=params.exaggeration,
                     cfg_weight=params.cfg_weight,
                     temperature=params.temperature,
                     use_analyzer=params.use_analyzer,
+                    voice_embedding_cache=voice_embedding_cache,
                 )
                 if not isinstance(waveform_batch, list):
                     waveform_batch = [waveform_batch]  # Ensure we always have a list
@@ -73,9 +146,7 @@ class ChatterboxEngine(AbstractTTSEngine):
             return all_waveforms
 
         finally:
-            # CRITICAL: Always restore the original method to prevent side-effects.
-            if original_watermark_method is not None:
-                logging.debug("Restoring original watermark method.")
+            if original_watermark_method:
                 self._model.watermarker.apply_watermark = original_watermark_method
 
 # Singleton instance

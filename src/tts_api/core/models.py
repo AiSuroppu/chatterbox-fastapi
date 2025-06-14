@@ -116,6 +116,8 @@ class ChatterboxParams(BaseModel):
     cfg_weight: float = Field(0.5, ge=0.0, le=1.0, description="CFG Weight.")
     disable_watermark: bool = Field(True, description="Disable Chatterbox's audio watermark.")
     use_analyzer: bool = Field(False, description="Enable the alignment analyzer for improved quality and robustness. May fail on some inputs.")
+    voice_cache_token: Optional[str] = Field(
+        None, description="A token for a server-side cached voice. If provided, the 'ref_audio' file is ignored. The server returns this token in the 'X-Generation-Metadata' header after a successful generation with a new voice.")
 
 class ChatterboxTTSRequest(BaseTTSRequest):
     """The complete request model for the Chatterbox engine endpoint."""

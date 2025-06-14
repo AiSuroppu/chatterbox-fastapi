@@ -33,7 +33,9 @@ class Settings(BaseSettings):
     # PyTorch 2.0+ model compilation mode for Chatterbox (e.g., 'default', 'reduce-overhead', 'max-autotune').
     # Set to an empty string to disable compilation.
     CHATTERBOX_COMPILE_MODE: str = ""
-
+    # The maximum number of voice embeddings to keep in the server-side cache.
+    CHATTERBOX_VOICE_CACHE_SIZE: int = 50
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
