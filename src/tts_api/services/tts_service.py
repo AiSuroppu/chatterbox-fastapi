@@ -12,7 +12,8 @@ from enum import Enum, auto
 
 from tts_api.core.models import BaseTTSRequest
 from tts_api.tts_engines.base import AbstractTTSEngine
-from tts_api.services.text_processing import process_and_chunk_text
+# Updated imports to include the new structured text chunks
+from tts_api.services.text_processing import process_and_chunk_text, TextChunk, BoundaryType
 from tts_api.services.audio_processor import post_process_audio, get_speech_ratio
 from tts_api.services.validation import run_validation_pipeline, ValidationResult
 
@@ -80,7 +81,8 @@ def generate_speech_from_request(
     engine_params: 'BaseModel',
     ref_audio_data: bytes | None = None
 ) -> io.BytesIO:
-    input_segments = process_and_chunk_text(
+    # The chunker now returns a list of structured TextChunk objects.
+    input_segments: List[TextChunk] = process_and_chunk_text(
         text=req.text, options=req.text_processing
     )
     if not input_segments:
@@ -106,11 +108,11 @@ def generate_speech_from_request(
         logging.info(f"Initial seeds for {req.best_of} candidate(s): {candidate_seeds}")
 
         all_jobs = []
-        for i, segment_text in enumerate(input_segments):
+        for i, segment_chunk in enumerate(input_segments):
             for j in range(req.best_of):
                 initial_seed = candidate_seeds[j]  # Use the pre-calculated seed
                 all_jobs.append(GenerationJob(
-                    segment_idx=i, candidate_idx=j, text=segment_text, initial_seed=initial_seed
+                    segment_idx=i, candidate_idx=j, text=segment_chunk.text, initial_seed=initial_seed
                 ))
 
         # Phase 2: Multi-Pass Processing Loop
@@ -198,10 +200,10 @@ def generate_speech_from_request(
                 all_candidates[job.segment_idx].append({'waveform': job.waveform, 'score': job.score, 'seed': job.initial_seed})
 
         final_waveform_list = []
-        for i, segment_text in enumerate(input_segments):
+        for i, segment_info in enumerate(input_segments):
             candidates_for_segment = all_candidates[i]
             if not candidates_for_segment:
-                raise ValueError(f"TTS failed to produce any valid candidates for segment {i+1}: '{segment_text[:50]}...'")
+                raise ValueError(f"TTS failed to produce any valid candidates for segment {i+1}: '{segment_info.text[:50]}...'")
             
             best_candidate = max(candidates_for_segment, key=lambda c: c['score'])
             final_waveform_list.append(best_candidate['waveform'])
@@ -210,8 +212,41 @@ def generate_speech_from_request(
         if not final_waveform_list:
             raise ValueError("TTS generation failed to produce any audio.")
 
-        # Concatenate the best waveform from each chunk
-        final_waveform = torch.cat(final_waveform_list, dim=1)
+        # Final audio assembly
+        final_audio_parts = []
+        
+        def trim_waveform(wf: torch.Tensor, threshold: float = 1e-4) -> torch.Tensor:
+            """Trims silence from the beginning and end of a waveform."""
+            if wf.ndim == 1: wf = wf.unsqueeze(0)
+            non_silent_indices = torch.where(wf.abs() > threshold)[-1]
+            if non_silent_indices.numel() == 0:
+                return torch.zeros((wf.shape[0], 0), dtype=wf.dtype) # Return empty tensor if all silent
+            start, end = non_silent_indices.min().item(), non_silent_indices.max().item()
+            return wf[..., start:end+1]
+
+        for i, waveform in enumerate(final_waveform_list):
+            processed_waveform = trim_waveform(waveform) if req.post_processing.trim_segment_silence else waveform
+            final_audio_parts.append(processed_waveform)
+
+            # Add inter-segment silence if this is not the last segment
+            if i < len(final_waveform_list) - 1:
+                segment_info = input_segments[i]
+                pause_ms = 0
+                if segment_info.boundary_type == BoundaryType.PARAGRAPH:
+                    pause_ms = req.post_processing.inter_segment_silence_paragraph_ms
+                elif segment_info.boundary_type == BoundaryType.SENTENCE:
+                    pause_ms = req.post_processing.inter_segment_silence_sentence_ms
+                else: # HARD_LIMIT
+                    pause_ms = req.post_processing.inter_segment_silence_fallback_ms
+
+                if pause_ms > 0:
+                    num_channels = waveform.shape[0] if waveform.ndim > 1 else 1
+                    silence_samples = int((pause_ms / 1000) * engine.sample_rate)
+                    silence_tensor = torch.zeros((num_channels, silence_samples), dtype=waveform.dtype)
+                    final_audio_parts.append(silence_tensor)
+                    logging.info(f"Inserting {pause_ms}ms of '{segment_info.boundary_type.name}' silence after segment {i+1}.")
+
+        final_waveform = torch.cat(final_audio_parts, dim=1)
 
     finally:
         if ref_audio_path and os.path.exists(ref_audio_path):

@@ -2,12 +2,27 @@ import re
 import logging
 from typing import List, Sequence
 from functools import lru_cache
+from enum import Enum, auto
+from dataclasses import dataclass
 
 import pysbd
 from nemo_text_processing.text_normalization.normalize import Normalizer
 
 from tts_api.core.config import settings
 from tts_api.core.models import TextChunkingStrategy, TextProcessingOptions
+
+class BoundaryType(Enum):
+    """Describes the type of boundary that follows a text chunk."""
+    SENTENCE = auto()      # A standard sentence break.
+    PARAGRAPH = auto()     # A paragraph break (e.g., from a double newline).
+    HARD_LIMIT = auto()    # A break forced by character limit, not semantics.
+
+@dataclass
+class TextChunk:
+    """A container for a text chunk and its associated boundary metadata."""
+    text: str
+    # The type of break that FOLLOWS this chunk.
+    boundary_type: BoundaryType
 
 @lru_cache(maxsize=settings.PYSBD_CACHE_SIZE)
 def get_segmenter(language: str) -> pysbd.Segmenter:
@@ -318,41 +333,60 @@ def _chunk_sentences_greedy(sentences: List[str], options: TextProcessingOptions
         chunks.append(current_chunk)
     return chunks
 
-def process_and_chunk_text(text: str, options: TextProcessingOptions) -> List[str]:
+def process_and_chunk_text(text: str, options: TextProcessingOptions) -> List[TextChunk]:
     """
     The main entry point for cleaning, normalizing, and chunking text for TTS.
+    This function returns a list of TextChunk objects, which include metadata
+    about the type of boundary that follows each chunk.
     """
     # The Paragraph strategy has a special case where it processes paragraph by paragraph.
     # For all other strategies, we prepare sentences from the whole text at once.
     
     strategy = options.chunking_strategy
-    
+    structured_chunks: List[TextChunk] = []
+
     if strategy == TextChunkingStrategy.SIMPLE:
         # For 'SIMPLE', we prepare sentences to get all normalization benefits,
         # but then we join and re-split them without regard for sentence boundaries,
         # which is the spirit of this strategy.
         sentences = _prepare_and_segment_sentences(text, options)
         full_processed_text = " ".join(sentences)
-        chunks = _force_split_long_chunk(full_processed_text, options.max_chunk_length)
-    
-    else: # PARAGRAPH, BALANCED, or GREEDY
+        chunks_text = _force_split_long_chunk(full_processed_text, options.max_chunk_length)
+        if chunks_text:
+            # All but the last chunk are hard-limit splits.
+            for chunk in chunks_text[:-1]:
+                structured_chunks.append(TextChunk(chunk, BoundaryType.HARD_LIMIT))
+            # The final chunk is considered a sentence end.
+            structured_chunks.append(TextChunk(chunks_text[-1], BoundaryType.SENTENCE))
+
+    else:  # PARAGRAPH, BALANCED, or GREEDY
         # These strategies all operate on pre-segmented, length-validated units.
-        chunks = []
+        chunker_func = {
+            TextChunkingStrategy.PARAGRAPH: _chunk_sentences_balanced,
+            TextChunkingStrategy.BALANCED: _chunk_sentences_balanced,
+            TextChunkingStrategy.GREEDY: _chunk_sentences_greedy,
+        }.get(strategy)
+
         if strategy == TextChunkingStrategy.PARAGRAPH:
             paragraphs = re.split(r'\n{2,}', text.strip())
             for para in paragraphs:
                 if not para.strip(): continue
                 sentences = _prepare_and_segment_sentences(para, options)
-                chunks.extend(_chunk_sentences_balanced(sentences, options))
-        elif strategy == TextChunkingStrategy.BALANCED:
+                para_chunks_text = chunker_func(sentences, options)
+                # Assign boundary types to the chunks of this paragraph
+                if para_chunks_text:
+                    for chunk in para_chunks_text[:-1]:
+                        structured_chunks.append(TextChunk(chunk, BoundaryType.SENTENCE))
+                    # The last chunk of a paragraph gets a PARAGRAPH boundary.
+                    structured_chunks.append(TextChunk(para_chunks_text[-1], BoundaryType.PARAGRAPH))
+        else: # BALANCED or GREEDY
             sentences = _prepare_and_segment_sentences(text, options)
-            chunks = _chunk_sentences_balanced(sentences, options)
-        elif strategy == TextChunkingStrategy.GREEDY:
-            sentences = _prepare_and_segment_sentences(text, options)
-            chunks = _chunk_sentences_greedy(sentences, options)
-        else:
-            raise ValueError(f"Unknown chunking strategy: '{strategy}'")
-        
-    final_chunks = [chunk for chunk in chunks if chunk]
+            chunks_text = chunker_func(sentences, options)
+            # All chunks from these strategies are sentence-based.
+            for chunk in chunks_text:
+                structured_chunks.append(TextChunk(chunk, BoundaryType.SENTENCE))
+    
+    # Filter out any empty chunks that might have been created
+    final_chunks = [chunk for chunk in structured_chunks if chunk.text]
     logging.info(f"Processed text into {len(final_chunks)} chunks using '{strategy}' strategy.")
     return final_chunks

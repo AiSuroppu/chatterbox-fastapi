@@ -33,9 +33,7 @@ class TextProcessingOptions(BaseModel):
             "'paragraph': Keeps paragraphs whole, falling back to 'balanced' for long ones (Recommended). "
             "'balanced': Optimally splits sentences for even chunk sizes. "
             "'greedy': Groups sentences greedily (faster, less even). "
-            "'simple': Force-splits by character length."
-        )
-    )
+            "'simple': Force-splits by character length."))
     shortness_penalty_factor: float = Field(2.0, ge=1.0, description="Factor to penalize short chunks in the 'balanced' strategy. Higher values avoid tiny chunks more aggressively.")
     ideal_chunk_length: int = Field(300, ge=50, le=1000, description="The target character length for chunks. Used by 'balanced' strategy.")
     max_chunk_length: int = Field(500, ge=50, le=1000, description="The absolute maximum character length for any text chunk.")
@@ -75,7 +73,16 @@ class PostProcessingOptions(BaseModel):
     vad_speech_pad_ms: int = Field(50, ge=0, le=500, description="Padding (ms) added to the start/end of speech segments to prevent clipping.")
     vad_fade_ms: int = Field(10, ge=0, le=200, description="Duration (ms) of fade-in/out at speech boundaries for smooth transitions.")
     max_voiced_dynamic_range_db: Optional[float] = Field(20.0, ge=0.0, le=60.0, description="Segments with RMS energy this many dB below the loudest segment will be filtered out. Set to None to disable.")
-    
+
+    trim_segment_silence: bool = Field(
+        True, description="Trim leading/trailing silence from each audio segment before concatenation. This is recommended when setting inter-segment silences to non-zero values.")
+    inter_segment_silence_sentence_ms: int = Field(
+        200, ge=0, le=5000, description="Silence duration (ms) to insert between segments that represent sentences within the same paragraph.")
+    inter_segment_silence_paragraph_ms: int = Field(
+        600, ge=0, le=5000, description="Silence duration (ms) to insert between segments that represent paragraph breaks.")
+    inter_segment_silence_fallback_ms: int = Field(
+        150, ge=0, le=5000, description="Silence duration (ms) to insert when a segment was split due to length, not a semantic boundary.")
+
     normalize_audio: bool = Field(True, description="Normalize audio loudness with ffmpeg.")
     normalize_method: AudioNormalizationMethod = Field(AudioNormalizationMethod.EBU, description="Normalization method.")
     normalize_level: float = Field(-18.0, ge=-70.0, le=-5.0, description="EBU Target Integrated Loudness (LUFS).")
