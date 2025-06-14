@@ -8,7 +8,7 @@ import re
 # A registry of known TTS engines and their git repositories
 ENGINE_REGISTRY = {
     "chatterbox": {
-        "repo": "https://github.com/resemble-ai/chatterbox.git",
+        "repo": "https://github.com/AiSuroppu/chatterbox.git",
         "torch_version": "2.6.0",
         "torchaudio_version": "2.6.0",
     }
