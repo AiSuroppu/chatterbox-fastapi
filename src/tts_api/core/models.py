@@ -38,7 +38,7 @@ class TextProcessingOptions(BaseModel):
     ideal_chunk_length: int = Field(300, ge=50, le=1000, description="The target character length for chunks. Used by 'balanced' strategy.")
     max_chunk_length: int = Field(500, ge=50, le=1000, description="The absolute maximum character length for any text chunk.")
 
-class ValidationParams(BaseModel):
+class ValidationOptions(BaseModel):
     """Parameters for post-generation validation and retries."""
     max_silence_dbfs: Optional[float] = Field(
         -60.0, ge=-120.0, le=-10.0,  description="Fail if raw audio RMS is below this level (dBFS). Catches silent/dead outputs. Set to None to disable.")
@@ -111,7 +111,7 @@ class BaseTTSRequest(BaseModel):
     seed: Union[int, List[int]] = Field(0, description="Random seed or a list of seeds. If a list is provided, seeds are used sequentially for each generation candidate. A seed of 0 means use a random seed.")
     best_of: int = Field(1, ge=1, le=10, description="Generate multiple speech outputs and automatically return the one with the highest speech-to-audio-duration ratio. Higher values take longer but can improve quality.")
     max_retries: int = Field(1, ge=0, le=10, description="Number of times to retry a failed or low-quality generation for a single text chunk.")
-    validation_params: ValidationParams = Field(default_factory=ValidationParams)
+    validation: ValidationOptions = Field(default_factory=ValidationOptions)
     text_processing: TextProcessingOptions = Field(default_factory=TextProcessingOptions)
     post_processing: PostProcessingOptions = Field(default_factory=PostProcessingOptions)
 

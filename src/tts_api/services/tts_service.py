@@ -276,7 +276,7 @@ def generate_speech_from_request(
                             waveform=waveform,
                             sample_rate=engine.sample_rate,
                             text_chunk=job.text,
-                            validation_params=req.validation_params,
+                            validation_params=req.validation,
                             post_processing_params=req.post_processing,
                             language=req.text_processing.text_language,
                             vad_speech_timestamps=vad_timestamps

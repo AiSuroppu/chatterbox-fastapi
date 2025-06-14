@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 
-from tts_api.core.models import ValidationParams, PostProcessingOptions
+from tts_api.core.models import ValidationOptions, PostProcessingOptions
 # Import the new centralized VAD function
 from tts_api.services.audio_processor import get_speech_timestamps as run_vad_on_waveform
 
@@ -21,7 +21,7 @@ class ValidationContext:
     original_waveform: torch.Tensor
     sample_rate: int
     text_chunk: str
-    validation_params: ValidationParams
+    validation_params: ValidationOptions
     post_processing_params: PostProcessingOptions
     language: str
     _precomputed_vad_timestamps: Optional[List[Dict]] = None
@@ -241,7 +241,7 @@ QUALITY_VALIDATORS = [ClippingValidator(), SpectralCentroidValidator()]
 
 def run_validation_pipeline(
     waveform: torch.Tensor, sample_rate: int, text_chunk: str,
-    validation_params: ValidationParams, post_processing_params: PostProcessingOptions, language: str,
+    validation_params: ValidationOptions, post_processing_params: PostProcessingOptions, language: str,
     vad_speech_timestamps: Optional[List[Dict]] = None
 ) -> ValidationResult:
     context = ValidationContext(
