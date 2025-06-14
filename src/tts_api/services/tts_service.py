@@ -14,7 +14,7 @@ from tts_api.core.models import BaseTTSRequest
 from tts_api.tts_engines.base import AbstractTTSEngine
 from tts_api.services.text_processing import process_and_chunk_text
 from tts_api.services.audio_processor import post_process_audio, get_speech_ratio
-from tts_api.services.validation import ALL_VALIDATORS, ValidationResult
+from tts_api.services.validation import run_validation_pipeline, ValidationResult
 
 def set_seed(seed: int):
     torch.manual_seed(seed)
@@ -164,15 +164,17 @@ def generate_speech_from_request(
                     job.attempt_count += 1
                     waveform = generated_waveforms[i]
                     
-                    final_result = ValidationResult(is_ok=True)
                     if waveform is None or waveform.numel() == 0:
                         final_result = ValidationResult(is_ok=False, reason="Engine returned empty/None output")
                     else:
-                        for validator in ALL_VALIDATORS:
-                            result = validator.is_valid(waveform, engine.sample_rate, job.text, req.validation_params)
-                            if not result.is_ok:
-                                final_result = result
-                                break
+                        final_result = run_validation_pipeline(
+                            waveform=waveform,
+                            sample_rate=engine.sample_rate,
+                            text_chunk=job.text,
+                            validation_params=req.validation_params,
+                            post_processing_params=req.post_processing, # Pass post-processing params
+                            language=req.text_processing.text_language
+                        )
                     
                     if final_result.is_ok:
                         job.status = JobStatus.SUCCESS

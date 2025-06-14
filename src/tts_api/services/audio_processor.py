@@ -53,6 +53,7 @@ def get_speech_ratio(
         model,
         sampling_rate=VAD_INTERNAL_SAMPLE_RATE,
         threshold=options.vad_threshold,
+        min_speech_duration_ms=options.vad_min_speech_ms,
         min_silence_duration_ms=options.vad_min_silence_ms,
         speech_pad_ms=options.vad_speech_pad_ms
     )

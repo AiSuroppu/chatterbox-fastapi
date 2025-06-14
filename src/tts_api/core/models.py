@@ -1,6 +1,6 @@
 from enum import Enum
 from pydantic import BaseModel, Field
-from typing import Literal, List, Union
+from typing import Literal, List, Union, Optional
 
 # --- Engine Specific Parameter Models ---
 
@@ -42,8 +42,20 @@ class TextProcessingOptions(BaseModel):
 
 class ValidationParams(BaseModel):
     """Parameters for post-generation validation and retries."""
-    pass
-
+    max_silence_dbfs: Optional[float] = Field(
+        -60.0, ge=-120.0, le=-10.0,  description="Fail if raw audio RMS is below this level (dBFS). Catches silent/dead outputs. Set to None to disable.")
+    min_voiced_duration_per_syllable: Optional[float] = Field(
+        0.150, ge=0.0, le=2.0,  description="Fail if final speech duration is less than (this * syllables) (seconds). Catches truncated audio. Set to None to disable.")
+    max_voiced_duration_per_syllable: Optional[float] = Field(
+        0.350, ge=0.0, le=5.0,  description="Fail if final speech duration is more than (this * syllables) (seconds). Catches rambling and hallucinated audio. Set to None to disable.")
+    min_syllables_for_duration_validation: Optional[int] = Field(
+        7, ge=1, description="Do not run the voiced duration-per-syllable validator if the text chunk has fewer syllables than this. Helps prevent false failures on very short text. Set to None to always run.")
+    max_contiguous_silence_s: Optional[float] = Field(
+        2.8, ge=0.0, le=10.0,  description="Fail if any silent gap between speech chunks is longer than this (seconds). Set to None to disable.")
+    max_clipping_percentage: Optional[float] = Field(
+        0.1, ge=0.0, le=100.0,  description="Fail if more than this percentage of speech samples are clipped. Catches distortion. Set to None to disable.")
+    min_spectral_centroid_std_dev: Optional[float] = Field(
+        250.0, ge=0.0, le=6000.0,  description="Fail if spectral centroid std dev is lower than this level (Hz). Catches monotonous, noisy audio. Set to None to disable.")
 
 class AudioNormalizationMethod(str, Enum):
     EBU = "ebu"
@@ -56,14 +68,18 @@ class ExportFormat(str, Enum):
 
 class PostProcessingOptions(BaseModel):
     """Options for post-processing the generated audio."""
-    denoise_with_vad: bool = Field(True, description="Denoise silent segments using Silero-VAD.")
+    denoise_with_vad: bool = Field(True, description="Master switch to enable VAD-based denoising.")
     vad_threshold: float = Field(0.5, ge=0.0, le=1.0, description="VAD confidence threshold for detecting speech.")
-    vad_min_silence_ms: int = Field(100, ge=0, le=2000, description="Minimum silence duration (ms) to be replaced.")
-    vad_speech_pad_ms: int = Field(50, ge=0, le=500, description="Padding (ms) added to the start/end of speech.")
+    vad_min_silence_ms: int = Field(100, ge=0, le=5000, description="Minimum silence duration (ms) required to split speech segments.")
+    vad_min_speech_ms: int = Field(250, ge=0, le=1000, description="Minimum duration (ms) for a detected speech segment. Discards shorter segments as noise.")
+    vad_speech_pad_ms: int = Field(50, ge=0, le=500, description="Padding (ms) added to the start/end of speech segments to prevent clipping.")
     vad_fade_ms: int = Field(10, ge=0, le=200, description="Duration (ms) of fade-in/out at speech boundaries for smooth transitions.")
+    max_voiced_dynamic_range_db: Optional[float] = Field(20.0, ge=0.0, le=60.0, description="Segments with RMS energy this many dB below the loudest segment will be filtered out. Set to None to disable.")
+    
     normalize_audio: bool = Field(True, description="Normalize audio loudness with ffmpeg.")
     normalize_method: AudioNormalizationMethod = Field(AudioNormalizationMethod.EBU, description="Normalization method.")
-    normalize_level: float = Field(-18.0, ge=-70.0, le=-5.0, description="EBU Target Integrated Loudness (I).")
+    normalize_level: float = Field(-18.0, ge=-70.0, le=-5.0, description="EBU Target Integrated Loudness (LUFS).")
+
     export_format: ExportFormat = Field(ExportFormat.MP3, description="Final audio format.")
 
 
