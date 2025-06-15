@@ -186,7 +186,7 @@ def generate_speech_from_request(
     engine: AbstractTTSEngine,
     engine_params: 'BaseModel',
     ref_audio_data: bytes | None = None
-) -> io.BytesIO:
+) -> SynthesisResult:
     input_segments: List[TextChunk] = process_and_chunk_text(
         text=req.text, options=req.text_processing
     )
