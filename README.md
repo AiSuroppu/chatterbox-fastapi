@@ -96,30 +96,39 @@ curl http://127.0.0.1:8000/engines/chatterbox/config | jq
 ```
 
 This will return a complete JSON object that you can use as a template for your `/{engine_name}/generate` requests.
+### Voice Caching and Management
 
-### Using the `X-Generation-Metadata` Header for Voice Caching
+Many TTS engines require an expensive "voice embedding" calculation. This embedding, which defines the voice's characteristics, can be created in several ways that benefit from caching:
 
-Some engines can return useful information in the `X-Generation-Metadata` response header. For example, the `chatterbox` engine supports server-side voice caching to avoid re-computing a voice embedding on every request.
+*   **Voice Cloning:** Analyzing a user-provided `ref_audio` file to replicate the speaker's voice.
+*   **Voice Synthesis:** Using a model to generate a unique voice based on a descriptive text prompt (e.g., "a clear, friendly female voice with a neutral American accent") or a list of predefined voice parameters.
+
+In both cases, the initial computation is slow, but the resulting embedding can be cached by the server. The `voice_cache_token` is your key to using this cache. On any successful request that generates or uses a specific voice, the server will return the corresponding token in the `X-Generation-Metadata` response header.
 
 **Workflow:**
 
-1.  Make a generation request with a `ref_audio` file.
-2.  If successful, the response will contain an `X-Generation-Metadata` header with a JSON payload like: `{"voice_cache_token": "some-unique-token"}`.
-3.  For all subsequent requests with the *same voice*, you can omit the `ref_audio` file and instead include the token in your JSON payload:
+1.  Make an initial generation request with a full **voice specification** (e.g., send a `ref_audio` file for cloning, or a `voice_prompt` for synthesis).
+2.  If successful, the response will contain an `X-Generation-Metadata` header with a JSON payload like: `{"voice_cache_token": "some-unique-token"}`. **Store this token.**
+3.  For all subsequent requests with the *same voice*, you can omit the original voice specification and instead include the token in your JSON payload:
     ```json
     {
       "chatterbox_params": {
         "voice_cache_token": "some-unique-token"
-      },
-      ...
+      }
     }
     ```
-This significantly speeds up requests and reduces bandwidth. The server cache size is configurable in the `.env` file.
+This speeds up requests and reduces bandwidth. The server cache size is configurable in the `.env` file.
+
+#### Handling Expired Voice Tokens
+
+If you provide a `voice_cache_token` that the server no longer has (because its cache expired or was cleared), the API will respond with an **`HTTP 409 Conflict`** error.
+
+**To resolve this**, simply re-send your request with the original voice specification (e.g., the `ref_audio` file). A successful response will provide a new, valid `voice_cache_token` for you to use.
 
 ### Example with `curl`
 
 1.  Create a file named `request.json` with your desired parameters (see the full payload below).
-2.  Run the `curl` command, replacing the path to your reference audio. Use `-D -` to view the response headers.
+2.  Run the `curl` command, replacing the path to your reference audio. Use `-D -` to view the response headers and retrieve the token.
 
     ```bash
     curl -X POST "http://127.0.0.1:8000/chatterbox/generate" \
@@ -138,16 +147,6 @@ import json
 payload = {
   "text": "This is a test of the text-to-speech generation. This API has many powerful features for robust audio creation.",
   "seed": 1234,
-  "best_of": 2,
-  "max_retries": 1,
-  "text_processing": {
-    "text_language": "en",
-    "use_nemo_normalizer": True
-  },
-  "post_processing": {
-    "export_format": "mp3",
-    "normalize_level": -18.0
-  },
   "chatterbox_params": {
     "temperature": 0.75
   }
@@ -166,17 +165,21 @@ response = requests.post(url, files=files, stream=True)
 
 # 4. Save the streaming audio response and check for metadata
 if response.status_code == 200:
-    # Check for the metadata header
+    # Check for the metadata header and save the token
     if "X-Generation-Metadata" in response.headers:
         metadata = json.loads(response.headers["X-Generation-Metadata"])
         voice_token = metadata.get("voice_cache_token")
         print(f"Received voice cache token: {voice_token}")
-        # You can now save this token and use it for future requests
+        # You should now save this token and use it for future requests
 
     with open("output.mp3", "wb") as f:
         for chunk in response.iter_content(chunk_size=8192):
             f.write(chunk)
     print("Audio saved to output.mp3")
+elif response.status_code == 409:
+    print("Error: The voice token is invalid or expired.")
+    print("Please re-run the request with the 'ref_audio' file to get a new token.")
+    print(response.json())
 else:
     print(f"Error: {response.status_code}")
     print(response.json())
@@ -195,14 +198,15 @@ This example shows all available parameters with detailed comments. You can sele
   "max_retries": 1, // For each chunk, retry generation this many times if it fails validation.
 
   // --- Engine-Specific Parameters ---
-  // This object's name and content will change depending on the engine.
+  // The name and content of this object changes depending on the engine.
+  // This example is for 'chatterbox', a voice cloning engine.
   "chatterbox_params": {
     "exaggeration": 0.5,
     "temperature": 0.8,
     "cfg_weight": 0.5,
     "disable_watermark": true,
     "use_analyzer": false,
-    "voice_cache_token": null // Token for a server-side cached voice. If provided, the 'ref_audio' file is ignored.
+    "voice_cache_token": null // If you have a token, provide it here to bypass 'ref_audio' upload.
   },
 
   // --- Text Pre-Processing Controls ---
@@ -279,7 +283,7 @@ The `configure.py` script creates a `.env` file in the project root. You can edi
 The project is designed to be truly pluggable. To add support for a new TTS engine (e.g., "my_engine"), follow these steps:
 
 1.  **Add to `configure.py`**: Add the engine's name and Git repository to the `ENGINE_REGISTRY` in `configure.py` so the setup script can install it.
-2.  **Create Engine Class**: In `src/tts_api/tts_engines/`, create a new file for your engine (e.g., `my_engine.py`). It must contain a class that inherits from `AbstractTTSEngine` and implements the `load_model` and `generate` methods.
+2.  **Create Engine Class**: In `src/tts_api/tts_engines/`, create a new file for your engine (e.g., `my_engine.py`). It must contain a class that inherits from `AbstractTTSEngine` and implements the `load_model`, `prepare_generation`, and `generate` methods. The `prepare_generation` method is where you will implement your engine's specific voice logic (e.g., handling `voice_id` or `ref_audio`).
 3.  **Define Pydantic Models**: In `src/tts_api/core/models.py`, create two Pydantic models:
     *   A model for your engine's specific parameters (e.g., `MyEngineParams`).
     *   A final request model that inherits from `BaseTTSRequest` and includes your params model (e.g., `class MyEngineRequest(BaseTTSRequest): my_engine_params: MyEngineParams = Field(...)`).
