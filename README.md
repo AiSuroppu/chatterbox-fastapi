@@ -296,4 +296,4 @@ The project is designed to be truly pluggable. To add support for a new TTS engi
     }
     ```
 
-That's it! The API will automatically expose `/generate/my_engine` and `/engines/my_engine/config` endpoints without any further code changes.
+That's it! The API will automatically expose `/my_engine/generate` and `/engines/my_engine/config` endpoints without any further code changes.
