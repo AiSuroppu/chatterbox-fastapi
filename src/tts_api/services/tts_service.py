@@ -313,7 +313,7 @@ def generate_speech_from_request(
         
         best_job = max(candidates_for_segment, key=lambda j: j.result.score)
         final_segments.append(best_job.result)
-        logging.info(f"Selected best candidate for segment {i+1} (score: {best_job.result.score:.4f}, seed: {best_job.initial_seed})")
+        logging.info(f"Selected best candidate for segment {i+1} (score: {best_job.result.score:.4f}, seed: {best_job.current_seed})")
 
     if not final_segments:
         raise ValueError("TTS generation failed to produce any audio.")

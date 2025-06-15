@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     # Set to an empty string to disable compilation.
     CHATTERBOX_COMPILE_MODE: str = ""
     # The maximum number of voice embeddings to keep in the server-side cache.
-    CHATTERBOX_VOICE_CACHE_SIZE: int = 50
+    CHATTERBOX_VOICE_CACHE_SIZE: int = 10
     
     class Config:
         env_file = ".env"

@@ -124,7 +124,7 @@ def main(engine_name, cuda_version_override):
         f.write("# Set to an empty string to disable compilation.\n")
         f.write('CHATTERBOX_COMPILE_MODE=""\n\n')
         f.write("# The maximum number of voice embeddings to keep in the server-side cache.\n")
-        f.write('#CHATTERBOX_VOICE_CACHE_SIZE=50\n\n')
+        f.write('#CHATTERBOX_VOICE_CACHE_SIZE=10\n\n')
 
     # --- Step 8: Pre-download required models ---
     print("8. Pre-downloading required models...")
