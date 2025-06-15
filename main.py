@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Body, File, UploadFile, Form, Depend
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from tts_api.core.config import settings
+from tts_api.core.exceptions import InvalidVoiceTokenException
 from tts_api.core.models import BaseTTSRequest, ChatterboxTTSRequest, ExportFormat
 from tts_api.tts_engines.base import AbstractTTSEngine
 from tts_api.tts_engines.chatterbox_engine import chatterbox_engine
@@ -185,6 +186,10 @@ async def generate_speech(
         
         return response
 
+    except InvalidVoiceTokenException as e:
+        logging.warning(f"Client used an invalid voice token for engine '{engine_name}': {e}")
+        # Return a 409 Conflict with the clear, actionable message from the exception.
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as ve:
         logging.warning(f"Bad request for engine '{engine_name}': {ve}")
         raise HTTPException(status_code=400, detail=str(ve))
