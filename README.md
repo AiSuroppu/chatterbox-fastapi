@@ -227,7 +227,8 @@ This example shows all available parameters with detailed comments. You can sele
     "min_syllables_for_duration_validation": 7, // Don't run duration validation on very short text.
     "max_contiguous_silence_s": 2.8, // Fail if there's a long silent gap in the middle.
     "max_clipping_percentage": 0.1, // Fail if the audio has distortion.
-    "min_spectral_centroid_std_dev": 250.0 // Fail if the audio is monotonous (e.g., pure noise).
+    "min_spectral_centroid_std_dev": 2000.0, // Fail if the audio is monotonous (e.g., pure noise).
+    "min_syllables_for_spectral_validation": 7 // Don't run duration validation on very short text.
   },
 
   // --- Audio Post-Processing and Export Controls ---

@@ -111,8 +111,10 @@ def main(engine_name, cuda_version_override):
         f.write("# LRU cache sizes for language-specific normalizers and segmenters.\n")
         f.write("# Increase if you support many languages concurrently.\n")
         f.write("#NEMO_NORMALIZER_CACHE_SIZE=4\n")
-        f.write("#PYSBD_CACHE_SIZE=4\n\n")
-        
+        f.write("#PYSBD_CACHE_SIZE=4\n")
+        f.write("# LRU cache size for the pyphen.Pyphen dictionary instances.\n")
+        f.write("#PYPHEN_CACHE_SIZE=4\n\n")
+
         f.write("# --- Chatterbox Specific Settings ---\n")
         f.write("# The maximum number of text segments to process in a single batch for Chatterbox.\n")
         f.write("# Increase on high-VRAM GPUs for better throughput.\n")

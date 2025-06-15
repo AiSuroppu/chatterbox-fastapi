@@ -44,7 +44,9 @@ class ValidationOptions(BaseModel):
     max_clipping_percentage: Optional[float] = Field(
         0.1, ge=0.0, le=100.0,  description="Fail if more than this percentage of speech samples are clipped. Catches distortion. Set to None to disable.")
     min_spectral_centroid_std_dev: Optional[float] = Field(
-        250.0, ge=0.0, le=6000.0,  description="Fail if spectral centroid std dev is lower than this level (Hz). Catches monotonous, noisy audio. Set to None to disable.")
+        2000.0, ge=0.0, le=6000.0,  description="Fail if spectral centroid std dev is lower than this level (Hz). Catches monotonous, noisy audio. Set to None to disable.")
+    min_syllables_for_spectral_validation: Optional[int] = Field(
+        7, ge=1, description="Do not run the spectral centroid validator if the text chunk has fewer syllables than this. Helps prevent false failures on very short text (e.g., 'Yes', 'Okay'). Set to None to always run.")
 
 class AudioNormalizationMethod(str, Enum):
     EBU = "ebu"

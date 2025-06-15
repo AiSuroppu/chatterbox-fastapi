@@ -9,6 +9,7 @@ from typing import List, Dict, Optional, Tuple
 from tts_api.core.models import ValidationOptions, PostProcessingOptions
 # Import the new centralized VAD function
 from tts_api.services.audio_processor import get_speech_timestamps as run_vad_on_waveform
+from tts_api.utils.pyphen_cache import get_pyphen
 
 @dataclass
 class ValidationResult:
@@ -28,6 +29,7 @@ class ValidationContext:
 
     _vad_results: Optional[Tuple[List[Dict], torch.Tensor]] = None
     _filtered_speech_segments: Optional[List[Dict]] = None
+    _syllable_count: Optional[int] = None
 
     def _run_vad_once(self):
         if self._vad_results is not None:
@@ -58,6 +60,34 @@ class ValidationContext:
                 segments = f.filter(segments, self)
             self._filtered_speech_segments = segments
         return self._filtered_speech_segments
+
+    @property
+    def syllable_count(self) -> int:
+        """
+        Calculates and caches the syllable count for the text_chunk.
+        Returns 0 if syllable counting fails or text is empty.
+        """
+        if self._syllable_count is not None:
+            return self._syllable_count
+
+        try:
+            # Use our globally cached factory to get the pyphen object
+            dic = get_pyphen(lang=self.language)
+            words = self.text_chunk.split()
+            if not words:
+                self._syllable_count = 0
+                return 0
+
+            count = sum(len(dic.inserted(word).split('-')) for word in words)
+            # Treat symbol-only text etc. as one syllable
+            self._syllable_count = count if count > 0 else 1
+            return self._syllable_count
+        except Exception as e:
+            # If counting fails for any reason, log a warning and return 0
+            # to prevent validation from crashing.
+            logging.warning(f"Syllable counting failed for lang='{self.language}': {e}. Returning 0 syllables.")
+            self._syllable_count = 0
+            return 0
 
 class AbstractValidator(ABC):
     @abstractmethod
@@ -108,18 +138,10 @@ class VoicedDurationValidator(AbstractValidator):
         if params.min_voiced_duration_per_syllable is None and params.max_voiced_duration_per_syllable is None:
             return ValidationResult(is_ok=True)
 
-        try:
-            dic = pyphen.Pyphen(lang=context.language)
-            words = context.text_chunk.split()
-            if not words:
-                return ValidationResult(is_ok=True) # Cannot validate empty text
-            syllable_count = sum(len(dic.inserted(word).split('-')) for word in words)
-            if syllable_count == 0:
-                syllable_count = 1 # Treat symbol-only text etc. as one syllable
-        except Exception as e:
-            logging.warning(f"Could not count syllables for lang='{context.language}', skipping VoicedDurationValidator. Error: {e}")
-            return ValidationResult(is_ok=True)
-            
+        syllable_count = context.syllable_count
+        if syllable_count == 0:
+            return ValidationResult(is_ok=True) # Cannot validate
+
         # Skip validation for very short text based on syllable count
         if params.min_syllables_for_duration_validation is not None:
             if syllable_count < params.min_syllables_for_duration_validation:
@@ -132,9 +154,6 @@ class VoicedDurationValidator(AbstractValidator):
         total_voiced_samples = sum(s['end'] - s['start'] for s in context.filtered_speech_segments)
         total_voiced_seconds = total_voiced_samples / context.sample_rate
         
-        if syllable_count == 0: # Should be unreachable due to above logic
-            return ValidationResult(is_ok=True)
-            
         ratio = total_voiced_seconds / syllable_count
 
         if params.min_voiced_duration_per_syllable is not None and ratio < params.min_voiced_duration_per_syllable:
@@ -187,30 +206,59 @@ class ClippingValidator(AbstractValidator):
 
 def _calculate_spectral_centroid_std_dev(context: ValidationContext) -> Optional[float]:
     """
-    Calculates the standard deviation of the spectral centroid across voiced segments.
+    Calculates the standard deviation of the spectral centroid across all voiced frames.
     Returns the float value or None if it cannot be computed.
     """
-    # We need at least two segments to calculate a meaningful standard deviation.
-    if len(context.filtered_speech_segments) < 2:
+    if not context.filtered_speech_segments:
         return None
 
     try:
-        spectrogram_transform = torchaudio.transforms.Spectrogram(n_fft=2048, power=2)
-        segment_centroids = []
-        for seg in context.filtered_speech_segments:
-            segment_slice = context.original_waveform[..., seg['start']:seg['end']]
-            if segment_slice.numel() < spectrogram_transform.n_fft:
-                continue
-            
-            spec = spectrogram_transform(segment_slice)
-            freqs = torch.linspace(0, context.sample_rate / 2, steps=spec.shape[-2]).unsqueeze(-1)
-            centroid_per_frame = torch.sum(freqs * spec, dim=-2) / (torch.sum(spec, dim=-2) + 1e-9)
-            segment_centroids.append(torch.mean(centroid_per_frame).item())
-        
-        if len(segment_centroids) < 2:
+        # 1. Concatenate all voiced speech segments into a single tensor.
+        voiced_audio = torch.cat(
+            [context.original_waveform[..., seg['start']:seg['end']] for seg in context.filtered_speech_segments],
+            dim=-1
+        )
+
+        # Use a smaller n_fft for better time resolution and to handle short segments.
+        # 1024 is a good balance for speech at 22-24kHz. Hop length is typically n_fft // 4.
+        n_fft = 1024
+        hop_length = n_fft // 4
+
+        if voiced_audio.numel() < n_fft:
+            logging.warning("Not enough voiced audio to calculate spectral centroid.")
             return None
-            
-        return torch.tensor(segment_centroids).std().item()
+
+        # 2. Create the spectrogram for the entire voiced portion at once.
+        spectrogram_transform = torchaudio.transforms.Spectrogram(
+            n_fft=n_fft,
+            hop_length=hop_length,
+            power=2 # Use power spectrogram for centroid calculation
+        )
+        spec = spectrogram_transform(voiced_audio)
+
+        # If spec has a channel dimension, remove it for calculation.
+        if spec.ndim == 3:
+            spec = spec.squeeze(0) # Shape: [freq, time]
+
+        # 3. Calculate frame-by-frame spectral centroid.
+        # Ensure freqs tensor device matches spectrogram device.
+        freqs = torch.linspace(0, context.sample_rate / 2, steps=spec.shape[0], device=spec.device)
+        
+        # Reshape for broadcasting: freqs -> [freq, 1], spec -> [freq, time]
+        # Result of multiplication is [freq, time]
+        numerator = torch.sum(freqs.unsqueeze(1) * spec, dim=0)
+        denominator = torch.sum(spec, dim=0) + 1e-9
+
+        # centroid_per_frame is now a 1D tensor of centroids, one for each time frame.
+        centroid_per_frame = numerator / denominator
+
+        # 4. Calculate the standard deviation of the frame-wise centroids.
+        # We need at least 2 frames for a meaningful standard deviation.
+        if centroid_per_frame.numel() < 2:
+            return None
+
+        std_dev = torch.std(centroid_per_frame).item()
+        return std_dev
 
     except Exception as e:
         logging.warning(f"Spectral Centroid calculation failed with an internal error: {e}", exc_info=True)
@@ -221,10 +269,20 @@ class SpectralCentroidValidator(AbstractValidator):
         params = context.validation_params
         if params.min_spectral_centroid_std_dev is None:
             return ValidationResult(is_ok=True)
-        
+
+        if params.min_syllables_for_spectral_validation is not None:
+            syllable_count = context.syllable_count
+            if syllable_count < params.min_syllables_for_spectral_validation:
+                logging.debug(
+                    f"Skipping spectral centroid validation for short text "
+                    f"(syllables: {syllable_count} < threshold: {params.min_syllables_for_spectral_validation})."
+                )
+                return ValidationResult(is_ok=True)
+
         std_dev = _calculate_spectral_centroid_std_dev(context)
 
         if std_dev is None:
+            logging.debug("Spectral centroid could not be calculated. Skipping validation for this check.")
             return ValidationResult(is_ok=True)
             
         if std_dev < params.min_spectral_centroid_std_dev:
