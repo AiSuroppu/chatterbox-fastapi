@@ -38,7 +38,11 @@ class Settings(BaseSettings):
     CHATTERBOX_COMPILE_MODE: str = ""
     # The maximum number of voice embeddings to keep in the server-side cache.
     CHATTERBOX_VOICE_CACHE_SIZE: int = 10
-    
+    # Offload the S3 generation model to CPU after use to save VRAM.
+    CHATTERBOX_OFFLOAD_S3GEN: bool = False
+    # Offload the T3 (text-to-token) model to CPU after use to save VRAM.
+    CHATTERBOX_OFFLOAD_T3: bool = False
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

@@ -277,6 +277,8 @@ The `configure.py` script creates a `.env` file in the project root. You can edi
 -   `CHATTERBOX_MAX_BATCH_SIZE`: Maximum text segments to process in a single batch. Increase on high-VRAM GPUs for better throughput.
 -   `CHATTERBOX_COMPILE_MODE`: PyTorch 2.0+ model compilation mode (e.g., 'default', 'reduce-overhead'). Can significantly speed up inference after a one-time warm-up. Set to `""` to disable.
 -   `CHATTERBOX_VOICE_CACHE_SIZE`: The maximum number of voice embeddings to keep in the server-side cache. Set to `0` to disable voice caching.
+-   `CHATTERBOX_OFFLOAD_S3GEN`: (`True`/`False`) Offloads the main audio generation model (S3) to the CPU after use. Saves a small amount of VRAM at a negligible performance cost. Recommended for GPUs with less VRAM.
+-   `CHATTERBOX_OFFLOAD_T3`: (`True`/`False`) Offloads the text-to-token model (T3) to the CPU after use.
 
 ## Extending the API (For Developers)
 

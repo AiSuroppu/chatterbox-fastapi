@@ -137,22 +137,21 @@ class ChatterboxEngine(AbstractTTSEngine):
                 original_watermark_method = self._model.watermarker.apply_watermark
                 self._model.watermarker.apply_watermark = _noop_watermark
             
-            all_waveforms = []
-            for i in range(0, len(text_chunks), settings.CHATTERBOX_MAX_BATCH_SIZE):
-                batch = text_chunks[i:i + settings.CHATTERBOX_MAX_BATCH_SIZE]
-                logging.debug(f"  Engine processing batch of size {len(batch)}")
-                waveform_batch = self._model.generate(
-                    text=batch,
-                    audio_prompt_path=None, # Explicitly set to None
-                    exaggeration=params.exaggeration,
-                    cfg_weight=params.cfg_weight,
-                    temperature=params.temperature,
-                    use_analyzer=params.use_analyzer,
-                    voice_embedding_cache=voice_embedding_cache,
-                )
-                if not isinstance(waveform_batch, list):
-                    waveform_batch = [waveform_batch]  # Ensure we always have a list
-                all_waveforms.extend(waveform_batch)
+            logging.debug(f"  Engine processing {len(text_chunks)} text chunks with a batch of size {settings.CHATTERBOX_MAX_BATCH_SIZE}")
+            all_waveforms = self._model.generate(
+                text=text_chunks,
+                audio_prompt_path=None, # Explicitly set to None
+                exaggeration=params.exaggeration,
+                cfg_weight=params.cfg_weight,
+                temperature=params.temperature,
+                use_analyzer=params.use_analyzer,
+                voice_embedding_cache=voice_embedding_cache,
+                offload_s3gen=settings.CHATTERBOX_OFFLOAD_S3GEN,
+                offload_t3=settings.CHATTERBOX_OFFLOAD_T3,
+                batch_size=settings.CHATTERBOX_MAX_BATCH_SIZE
+            )
+            if not isinstance(all_waveforms, list):
+                all_waveforms = [all_waveforms]  # Ensure we always have a list
             
             return all_waveforms
 
