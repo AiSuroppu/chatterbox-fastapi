@@ -33,14 +33,35 @@ class ValidationOptions(BaseModel):
     """Parameters for post-generation validation and retries."""
     max_silence_dbfs: Optional[float] = Field(
         -60.0, ge=-120.0, le=-10.0,  description="Fail if raw audio RMS is below this level (dBFS). Catches silent/dead outputs. Set to None to disable.")
+    max_contiguous_silence_s: Optional[float] = Field(
+        2.8, ge=0.0, le=10.0,  description="Fail if any silent gap between speech chunks is longer than this (seconds). Catches missing speech, VAD failures and unnatural silences. Set to None to disable.")
+    
+    # Expected speech duration validation
     min_voiced_duration_per_syllable: Optional[float] = Field(
         0.150, ge=0.0, le=2.0,  description="Fail if final speech duration is less than (this * syllables) (seconds). Catches truncated audio. Set to None to disable.")
     max_voiced_duration_per_syllable: Optional[float] = Field(
-        0.350, ge=0.0, le=5.0,  description="Fail if final speech duration is more than (this * syllables) (seconds). Catches rambling and hallucinated audio. Set to None to disable.")
+        0.350, ge=0.0, le=5.0,  description=(
+            "Fail if final speech duration is more than (this * syllables) (seconds). Catches rambling and hallucinated audio. Set to None to disable."
+            "This value is used for normal-complexity words when 'use_word_level_duration_analysis' is enabled, otherwise, it is used as the global maximum."))
     min_syllables_for_duration_validation: Optional[int] = Field(
         7, ge=1, description="Do not run the voiced duration-per-syllable validator if the text chunk has fewer syllables than this. Helps prevent false failures on very short text. Set to None to always run.")
-    max_contiguous_silence_s: Optional[float] = Field(
-        2.8, ge=0.0, le=10.0,  description="Fail if any silent gap between speech chunks is longer than this (seconds). Set to None to disable.")
+    # -- Word complexity analysis
+    use_word_level_duration_analysis: bool = Field(
+        True, description=(
+            "Enables a word-by-word analysis to calculate the maximum speech duration per syllable budget. "
+            "This allows for long onomatopoeia (e.g., 'Ahhhhhhhh') in the same sentence as normal text without causing a validation failure. If false, global 'max_voiced_duration_per_syllable' is used."))
+    min_word_len_for_low_complexity_analysis: int = Field(
+        7, ge=3, le=20, description=(
+            "A word must have at least this many characters to be eligible for low-complexity analysis. "
+            "This is intentionally set to a higher value by default to prioritize avoiding false positives on common, short English words."))
+    low_complexity_log_variety_threshold: float = Field(
+        1.6, ge=0.0, le=5.0, description=(
+            "The Log-Normalized Variety (LNV) threshold used in word-level analysis. Words with an LNV below this value are considered low-complexity. LNV = unique_chars / log(word_length). "
+            "Since analysis is restricted to longer words by 'min_word_len_for_low_complexity_analysis', this threshold is safer from misclassifying common words."))
+    low_complexity_max_duration_per_syllable: float = Field(
+        0.400, ge=0.0, le=10.0, description="The relaxed maximum speech duration per syllable for words identified as low-complexity (e.g., onomatopoeia) when word-level analysis is enabled.")
+    
+    # Audio quality validation
     max_clipping_percentage: Optional[float] = Field(
         0.1, ge=0.0, le=100.0,  description="Fail if more than this percentage of speech samples are clipped. Catches distortion. Set to None to disable.")
     min_spectral_centroid_std_dev: Optional[float] = Field(

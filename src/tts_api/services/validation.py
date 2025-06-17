@@ -1,13 +1,14 @@
-import torch
-import torchaudio
-import pyphen
+import re
+import math
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 
+import torch
+import torchaudio
+
 from tts_api.core.models import ValidationOptions, PostProcessingOptions
-# Import the new centralized VAD function
 from tts_api.services.audio_processor import get_speech_timestamps as run_vad_on_waveform
 from tts_api.utils.pyphen_cache import get_pyphen
 
@@ -133,41 +134,111 @@ class LowEnergySegmentFilter(AbstractFilter):
 
 # STAGE 3
 class VoicedDurationValidator(AbstractValidator):
+    
+    def _calculate_lnv(self, text: str) -> Optional[float]:
+        """Calculates the Log-Normalized Variety (LNV) of a text string."""
+        seg_len = len(text)
+        if seg_len <= 1:
+            return None
+        
+        unique_chars = len(set(text))
+        return unique_chars / math.log(seg_len)
+
+    def _calculate_dynamic_duration_budgets(self, context: ValidationContext) -> Tuple[int, float, float]:
+        """
+        Calculates dynamic min/max duration budgets by analyzing each word's complexity.
+
+        Returns:
+            A tuple of (total_syllables, min_duration_budget, max_duration_budget).
+        """
+        params = context.validation_params
+        dic = get_pyphen(lang=context.language)
+        
+        words = context.text_chunk.split()
+        if not words:
+            return 0, 0.0, 0.0
+
+        total_syllables = 0
+        max_duration_budget = 0.0
+
+        for word in words:
+            # 1. Calculate syllables on the original word.
+            try:
+                # Use pyphen to count syllables, fallback to 1 for errors/non-words.
+                syllables = len(dic.inserted(word).split('-'))
+                syllables = syllables if syllables > 0 else 1
+            except Exception:
+                syllables = 1
+            total_syllables += syllables
+
+            # 2. Clean word for LNV analysis.
+            cleaned_word = re.sub(r'^\W+|\W+$', '', word)
+            if not cleaned_word:
+                # Budget punctuation using the standard rate.
+                max_duration_budget += syllables * params.max_voiced_duration_per_syllable
+                continue
+            
+            # 3. Check if word is long enough for low-complexity analysis.
+            if len(cleaned_word) < params.min_word_len_for_low_complexity_analysis:
+                # Word is too short, treat as normal complexity.
+                max_duration_budget += syllables * params.max_voiced_duration_per_syllable
+                continue
+
+            # 4. Assess complexity of eligible words and allocate budget.
+            lnv = self._calculate_lnv(cleaned_word)
+            is_low_complexity = (lnv is not None and lnv < params.low_complexity_log_variety_threshold)
+
+            if is_low_complexity:
+                # Use the relaxed rate for stretched words/onomatopoeia.
+                max_duration_budget += syllables * params.low_complexity_max_duration_per_syllable
+                logging.debug(f"Word '{cleaned_word}' (LNV: {lnv:.2f}) budgeted with relaxed rate.")
+            else:
+                # Use the standard, stricter rate for normal words.
+                max_duration_budget += syllables * params.max_voiced_duration_per_syllable
+        
+        min_duration_budget = total_syllables * params.min_voiced_duration_per_syllable if params.min_voiced_duration_per_syllable else 0.0
+        return total_syllables, min_duration_budget, max_duration_budget
+
     def is_valid(self, context: ValidationContext) -> ValidationResult:
         params = context.validation_params
         if params.min_voiced_duration_per_syllable is None and params.max_voiced_duration_per_syllable is None:
             return ValidationResult(is_ok=True)
 
-        syllable_count = context.syllable_count
-        if syllable_count == 0:
-            return ValidationResult(is_ok=True) # Cannot validate
+        total_voiced_samples = sum(s['end'] - s['start'] for s in context.filtered_speech_segments)
+        actual_voiced_seconds = total_voiced_samples / context.sample_rate
 
-        # Skip validation for very short text based on syllable count
-        if params.min_syllables_for_duration_validation is not None:
-            if syllable_count < params.min_syllables_for_duration_validation:
-                logging.debug(
-                    f"Skipping duration validation for short text "
-                    f"(syllables: {syllable_count} < threshold: {params.min_syllables_for_duration_validation})."
-                )
+        if params.use_word_level_duration_analysis:
+            total_syllables, min_expected, max_expected = self._calculate_dynamic_duration_budgets(context)
+            if total_syllables == 0:
                 return ValidationResult(is_ok=True)
 
-        total_voiced_samples = sum(s['end'] - s['start'] for s in context.filtered_speech_segments)
-        total_voiced_seconds = total_voiced_samples / context.sample_rate
-        
-        ratio = total_voiced_seconds / syllable_count
+            if params.min_syllables_for_duration_validation is not None and total_syllables < params.min_syllables_for_duration_validation:
+                logging.debug(f"Skipping duration validation for short text (syllables: {total_syllables} < threshold).")
+                return ValidationResult(is_ok=True)
 
-        if params.min_voiced_duration_per_syllable is not None and ratio < params.min_voiced_duration_per_syllable:
-            reason = (
-                f"Final voiced duration too short: {ratio:.3f}s/syl "
-                f"(min: {params.min_voiced_duration_per_syllable:.3f}s/syl)"
-            )
-            return ValidationResult(is_ok=False, reason=reason)
-        if params.max_voiced_duration_per_syllable is not None and ratio > params.max_voiced_duration_per_syllable:
-            reason = (
-                f"Final voiced duration too long: {ratio:.3f}s/syl "
-                f"(max: {params.max_voiced_duration_per_syllable:.3f}s/syl)"
-            )
-            return ValidationResult(is_ok=False, reason=reason)
+            if params.min_voiced_duration_per_syllable is not None and actual_voiced_seconds < min_expected:
+                return ValidationResult(is_ok=False, reason=f"Voiced duration too short: {actual_voiced_seconds:.2f}s (min expected: {min_expected:.2f}s)")
+            
+            if params.max_voiced_duration_per_syllable is not None and actual_voiced_seconds > max_expected:
+                return ValidationResult(is_ok=False, reason=f"Voiced duration too long: {actual_voiced_seconds:.2f}s (max budget: {max_expected:.2f}s)")
+
+        else:
+            syllable_count = context.syllable_count
+            if syllable_count == 0:
+                return ValidationResult(is_ok=True)
+            
+            if params.min_syllables_for_duration_validation is not None and syllable_count < params.min_syllables_for_duration_validation:
+                logging.debug(f"Skipping duration validation for short text (syllables: {syllable_count} < threshold).")
+                return ValidationResult(is_ok=True)
+            
+            ratio = actual_voiced_seconds / syllable_count
+
+            if params.min_voiced_duration_per_syllable is not None and ratio < params.min_voiced_duration_per_syllable:
+                return ValidationResult(is_ok=False, reason=f"Voiced duration too short: {ratio:.3f}s/syl (min: {params.min_voiced_duration_per_syllable:.3f}s/syl)")
+            
+            if params.max_voiced_duration_per_syllable is not None and ratio > params.max_voiced_duration_per_syllable:
+                return ValidationResult(is_ok=False, reason=f"Voiced duration too long: {ratio:.3f}s/syl (max: {params.max_voiced_duration_per_syllable:.3f}s/syl)")
+
         return ValidationResult(is_ok=True)
 
 class MaxContiguousSilenceValidator(AbstractValidator):

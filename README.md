@@ -226,13 +226,20 @@ This example shows all available parameters with detailed comments. You can sele
   // Configure rules to detect and discard low-quality audio. Set any value to `null` to disable that check.
   "validation": {
     "max_silence_dbfs": -60.0, // Fail if audio is quieter than this (dBFS).
-    "min_voiced_duration_per_syllable": 0.150, // Fail if speech is too short for the text.
-    "max_voiced_duration_per_syllable": 0.350, // Fail if speech is too long (hallucinations).
-    "min_syllables_for_duration_validation": 7, // Don't run duration validation on very short text.
+
     "max_contiguous_silence_s": 2.8, // Fail if there's a long silent gap in the middle.
+
+    "min_voiced_duration_per_syllable": 0.150, // Global minimum duration per syllable to catch truncated audio.
+    "max_voiced_duration_per_syllable": 0.350, // Maximum duration per syllable for *normal* words. Catches rambling.
+    "min_syllables_for_duration_validation": 7, // Don't run any duration validation on very short text.
+    "use_word_level_duration_analysis": true, // Enables a word-by-word analysis to handle mixed-complexity text. Highly recommended to leave this enabled.
+    // The following parameters are only active when 'use_word_level_duration_analysis' is true.
+    "min_word_len_for_low_complexity_analysis": 7, // A word must be this long to be considered for low-complexity analysis. The default is high to prevent misclassifying common English words.
+    "low_complexity_log_variety_threshold": 1.6, // Words with a Log-Normalized Variety (LNV) below this are considered low-complexity. LNV = unique_chars / log(word_length).
+    "low_complexity_max_duration_per_syllable": 0.4, // The relaxed maximum duration budget for words identified as low-complexity.
     "max_clipping_percentage": 0.1, // Fail if the audio has distortion.
     "min_spectral_centroid_std_dev": 1800.0, // Fail if the audio is monotonous (e.g., pure noise).
-    "min_syllables_for_spectral_validation": 7 // Don't run duration validation on very short text.
+    "min_syllables_for_spectral_validation": 7 // Don't run spectral validation on very short text.
   },
 
   // --- Audio Post-Processing and Export Controls ---
