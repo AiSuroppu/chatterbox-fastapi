@@ -59,7 +59,7 @@ class ValidationOptions(BaseModel):
             "The Log-Normalized Variety (LNV) threshold used in word-level analysis. Words with an LNV below this value are considered low-complexity. LNV = unique_chars / log(word_length). "
             "Since analysis is restricted to longer words by 'min_word_len_for_low_complexity_analysis', this threshold is safer from misclassifying common words."))
     low_complexity_max_duration_per_syllable: float = Field(
-        0.400, ge=0.0, le=10.0, description="The relaxed maximum speech duration per syllable for words identified as low-complexity (e.g., onomatopoeia) when word-level analysis is enabled.")
+        0.600, ge=0.0, le=10.0, description="The relaxed maximum speech duration per syllable for words identified as low-complexity (e.g., onomatopoeia) when word-level analysis is enabled.")
     
     # Audio quality validation
     max_clipping_percentage: Optional[float] = Field(
