@@ -145,3 +145,17 @@ class ChatterboxParams(BaseModel):
 class ChatterboxTTSRequest(BaseTTSRequest):
     """The complete request model for the Chatterbox engine endpoint."""
     chatterbox_params: ChatterboxParams = ChatterboxParams()
+
+
+class FishSpeechParams(BaseModel):
+    """Parameters specific to the FishSpeech TTS engine."""
+    temperature: float = Field(0.8, ge=0.01, le=2.0, description="Generation temperature. Higher values are more random.")
+    top_p: float = Field(0.8, ge=0.0, le=1.0, description="Top-P sampling threshold.")
+    repetition_penalty: float = Field(1.1, ge=1.0, le=2.0, description="Penalty for repeating tokens.")
+    max_new_tokens: int = Field(1024, ge=1, le=4096, description="Maximum number of semantic tokens to generate per chunk.")
+    voice_cache_token: Optional[str] = Field(
+        None, description="A token for a server-side cached voice (encoded reference audio).")
+
+class FishSpeechTTSRequest(BaseTTSRequest):
+    """The complete request model for the FishSpeech engine endpoint."""
+    fish_speech_params: FishSpeechParams = FishSpeechParams()

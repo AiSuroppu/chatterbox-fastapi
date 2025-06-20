@@ -4,6 +4,7 @@ import sys
 import argparse
 import shutil
 import re
+from pathlib import Path
 
 # A registry of known TTS engines and their git repositories
 ENGINE_REGISTRY = {
@@ -11,11 +12,26 @@ ENGINE_REGISTRY = {
         "repo": "https://github.com/AiSuroppu/chatterbox.git",
         "torch_version": "2.6.0",
         "torchaudio_version": "2.6.0",
+        "setup_deps": [],
+        "downloads": [],
+    },
+    "fish_speech": {
+        "repo": "https://github.com/fishaudio/fish-speech.git",
+        "torch_version": "2.6.0",
+        "torchaudio_version": "2.6.0",
+        "setup_deps": ["huggingface-hub"],
+        "downloads": [
+            {
+                "type": "huggingface",
+                "repo_id": "fishaudio/openaudio-s1-mini",
+                "local_dir": "vendor/fish_speech/checkpoints/openaudio-s1-mini",
+                "description": "FishSpeech main model checkpoints",
+                "requires_login": True # Flag that this model is gated
+            }
+        ]
     }
 }
 
-# List of scripts to run for pre-downloading models or data
-DOWNLOAD_SCRIPTS = []
 
 def run_command(command, error_message):
     """Runs a command and exits on failure."""
@@ -44,6 +60,7 @@ def main(engine_name, cuda_version_override):
         sys.exit(1)
 
     print(f"--- Configuring project for TTS engine: {engine_name} ---")
+    engine_info = ENGINE_REGISTRY[engine_name]
 
     # --- Step 1: Prepare Python environment ---
     print("1. Preparing Python environment...")
@@ -51,16 +68,14 @@ def main(engine_name, cuda_version_override):
     venv_dir = ".venv"
     if is_conda:
         print(f"   - Detected active Conda environment: {os.environ.get('CONDA_DEFAULT_ENV')}")
-        python_executable = f'"{sys.executable}"'
-        pip_executable = f'"{sys.executable}" -m pip'
+        python_executable_path = sys.executable
     else:
         print("   - Creating local virtual environment in './.venv'.")
         if not os.path.exists(venv_dir):
             run_command(f'"{sys.executable}" -m venv {venv_dir}', "Failed to create venv.")
-        python_path = os.path.join(venv_dir, 'Scripts' if os.name == 'nt' else 'bin', 'python')
-        python_executable = f'"{python_path}"'
-        pip_path = os.path.join(venv_dir, 'Scripts' if os.name == 'nt' else 'bin', 'pip')
-        pip_executable = f'"{pip_path}"'
+        python_executable_path = os.path.join(venv_dir, 'Scripts' if os.name == 'nt' else 'bin', 'python')
+
+    pip_executable = f'"{python_executable_path}" -m pip'
 
     # --- Step 2: Clean up old vendor directory ---
     print("2. Cleaning up old vendor directory (if any)...")
@@ -69,7 +84,6 @@ def main(engine_name, cuda_version_override):
     
     # --- Step 3: Install PyTorch with correct CUDA support ---
     print("3. Installing PyTorch...")
-    engine_info = ENGINE_REGISTRY[engine_name]
     torch_version = engine_info["torch_version"]
     torchaudio_version = engine_info["torchaudio_version"]
     cuda_version = cuda_version_override or detect_cuda_version()
@@ -84,7 +98,6 @@ def main(engine_name, cuda_version_override):
     run_command(torch_cmd, "Failed to install PyTorch.")
 
     # --- Step 4: Install the main TTS API wrapper project ---
-    # This command reads pyproject.toml and installs the base dependencies.
     print("4. Installing the TTS API wrapper project in editable mode...")
     run_command(f"{pip_executable} install -e .", "Failed to install tts-api-wrapper project.")
 
@@ -98,8 +111,18 @@ def main(engine_name, cuda_version_override):
     print(f"6. Installing '{engine_name}' and its specific dependencies...")
     run_command(f"{pip_executable} install -e ./{submodule_path}", f"Failed to install {engine_name}.")
     
-    # --- Step 7: Create .env file ---
-    print("7. Creating .env file...")
+    # --- Step 7: Install setup-time dependencies for the engine ---
+    snapshot_download = None
+    if engine_info["setup_deps"]:
+        print(f"7. Installing setup-time dependencies for '{engine_name}'...")
+        deps_str = " ".join(engine_info["setup_deps"])
+        run_command(f"{pip_executable} install {deps_str}", f"Failed to install setup dependencies for {engine_name}.")
+        from huggingface_hub import snapshot_download
+    else:
+        print("7. No setup-time dependencies to install. Skipping.")
+        
+    # --- Step 8: Create .env file ---
+    print("8. Creating .env file...")
     with open(".env", "w") as f:
         f.write(f'ENABLED_MODELS=\'["{engine_name}"]\'\n')
         f.write(f'DEVICE="{"cuda" if cuda_version else "cpu"}"\n\n')
@@ -130,14 +153,67 @@ def main(engine_name, cuda_version_override):
         f.write("# Offload the T3 (text-to-token) model to CPU after use to save VRAM. Set to False if you have abundant VRAM.\n")
         f.write("#CHATTERBOX_OFFLOAD_T3=False\n\n")
 
-    # --- Step 8: Pre-download required models ---
-    print("8. Pre-downloading required models...")
-    if not DOWNLOAD_SCRIPTS:
-        print("   - No download scripts specified. Skipping.")
+        f.write("# --- FishSpeech Specific Settings ---\n")
+        f.write("# NOTE: The model path is relative to the project root and is set by the download script.\n")
+        f.write('#FISHSPEECH_T2S_CHECKPOINT_PATH="vendor/fish_speech/checkpoints/openaudio-s1-mini"\n')
+        f.write('FISHSPEECH_DECODER_CHECKPOINT_PATH="vendor/fish_speech/checkpoints/openaudio-s1-mini/model.pth"\n')
+        f.write("# The configuration name for the vocoder/decoder model.\n")
+        f.write('FISHSPEECH_DECODER_CONFIG_NAME="modded_dac_vq"\n')
+        f.write("# Enable PyTorch 2.0+ model compilation for the T2S model. Set to `true` to enable.\n")
+        f.write("FISHSPEECH_COMPILE=false\n")
+        f.write("# Maximum number of cached reference voices (prompt tokens) to keep in memory.\n")
+        f.write("FISHSPEECH_VOICE_CACHE_SIZE=10\n\n")
+
+    # --- Step 9: Pre-download required models ---
+    print("9. Pre-downloading required models...")
+    if not engine_info["downloads"]:
+        print("   - No download jobs specified for this engine. Skipping.")
+    elif snapshot_download is None and any(d.get("type") == "huggingface" for d in engine_info["downloads"]):
+        print("   - ERROR: huggingface-hub is not installed, but is required to download models. Skipping.")
     else:
-        for script_path in DOWNLOAD_SCRIPTS:
-            print(f"   - Running download script: {script_path}")
-            run_command(f"{python_executable} {script_path}", f"Failed to run download script {script_path}.")
+        for job in engine_info["downloads"]:
+            job_type = job.get("type")
+            print(f"   - Starting download job ({job.get('description', 'No description')})")
+            if job_type == "huggingface":
+                repo_id = job.get("repo_id")
+                local_dir = job.get("local_dir")
+                if not repo_id or not local_dir:
+                    print(f"     - ERROR: Invalid Hugging Face download job. Missing 'repo_id' or 'local_dir'.")
+                    continue
+                
+                if job.get("requires_login"):
+                    print(f"     - INFO: This model requires a Hugging Face account and login.")
+                    print(f"     - Make sure you have accepted the model's terms on its page: https://huggingface.co/{repo_id}")
+
+                print(f"     - Downloading '{repo_id}' to './{local_dir}'...")
+                os.makedirs(Path(local_dir).parent, exist_ok=True)
+                
+                try:
+                    snapshot_download(
+                        repo_id=repo_id,
+                        local_dir=local_dir,
+                    )
+                except Exception as e:
+                    error_str = str(e).lower()
+                    if "gated" in error_str or "restricted" in error_str or "access is denied" in error_str:
+                        print("\n--- HUGGING FACE AUTHENTICATION ERROR ---")
+                        print(f"Failed to download '{repo_id}' due to an access restriction.")
+                        print("This model requires you to be logged into your Hugging Face account.\n")
+                        print("Please follow these steps:")
+                        print(f"1. Go to the model's page on Hugging Face: https://huggingface.co/{repo_id}")
+                        print("2. Make sure you are logged in and have accepted the terms/gate for the model.")
+                        print("3. In your terminal, run the following command and enter your access token:")
+                        print("   huggingface-cli login")
+                        print("   (You can get an access token from https://huggingface.co/settings/tokens)\n")
+                        print("4. After logging in, re-run this configuration script:")
+                        print(f"   python configure.py --engine {engine_name}")
+                    else:
+                        print(f"\n--- ERROR ---")
+                        print(f"Failed to download from Hugging Face repo '{repo_id}'.")
+                        print(f"Error details: {e}")
+                    sys.exit(1)
+            else:
+                print(f"     - ERROR: Unknown download type '{job_type}'. Skipping.")
 
     # --- Final Instructions ---
     print("\n--- Configuration Complete! ---")

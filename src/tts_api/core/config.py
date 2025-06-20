@@ -43,6 +43,18 @@ class Settings(BaseSettings):
     # Offload the T3 (text-to-token) model to CPU after use to save VRAM.
     CHATTERBOX_OFFLOAD_T3: bool = False
 
+    # --- FishSpeech Specific Settings ---
+    # Path to the Text-to-Semantic (T2S) model checkpoint directory.
+    FISHSPEECH_T2S_CHECKPOINT_PATH: str = "vendor/fish_speech/checkpoints/openaudio-s1-mini"
+    # Path to the vocoder/decoder model checkpoint file.
+    FISHSPEECH_DECODER_CHECKPOINT_PATH: str = "vendor/fish_speech/checkpoints/openaudio-s1-mini/model.pth"
+    # The configuration name for the vocoder/decoder model.
+    FISHSPEECH_DECODER_CONFIG_NAME: str = "modded_dac_vq"
+    # Enable PyTorch 2.0+ model compilation for the T2S model.
+    FISHSPEECH_COMPILE: bool = False
+    # Maximum number of cached reference voices (prompt tokens) to keep in memory.
+    FISHSPEECH_VOICE_CACHE_SIZE: int = 10
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

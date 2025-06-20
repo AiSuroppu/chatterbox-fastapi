@@ -1,5 +1,6 @@
 import logging
 import json
+import importlib
 from dataclasses import dataclass
 from typing import Type, Optional
 from pydantic import BaseModel, ValidationError
@@ -9,9 +10,8 @@ from fastapi.responses import StreamingResponse, JSONResponse
 
 from tts_api.core.config import settings
 from tts_api.core.exceptions import InvalidVoiceTokenException
-from tts_api.core.models import BaseTTSRequest, ChatterboxTTSRequest, ExportFormat
+from tts_api.core.models import BaseTTSRequest, ExportFormat
 from tts_api.tts_engines.base import AbstractTTSEngine
-from tts_api.tts_engines.chatterbox_engine import chatterbox_engine
 from tts_api.services.tts_service import generate_speech_from_request
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -23,20 +23,53 @@ class EngineDefinition:
     request_model: Type[BaseTTSRequest]
     param_field_name: str
 
-# A central registry for all available TTS engine definitions
-ENGINE_REGISTRY: dict[str, EngineDefinition] = {
-    "chatterbox": EngineDefinition(
-        instance=chatterbox_engine,
-        request_model=ChatterboxTTSRequest,
-        param_field_name="chatterbox_params"  # The name of the field in ChatterboxTTSRequest
-    ),
+# Define the metadata for all SUPPORTED engines.
+SUPPORTED_ENGINES = {
+    "chatterbox": {
+        "engine_path": "tts_api.tts_engines.chatterbox_engine.chatterbox_engine",
+        "model_path": "tts_api.core.models.ChatterboxTTSRequest",
+        "param_field_name": "chatterbox_params"
+    },
+    "fish_speech": {
+        "engine_path": "tts_api.tts_engines.fish_speech_engine.fish_speech_engine",
+        "model_path": "tts_api.core.models.FishSpeechTTSRequest",
+        "param_field_name": "fish_speech_params"
+    },
     # To add a new engine, you would just add another entry here:
-    # "new_engine": EngineDefinition(
-    #     instance=new_engine_instance,
-    #     request_model=NewEngineTTSRequest,
-    #     param_field_name="new_engine_params"
-    # ),
+    # "new_engine": {
+    #     "engine_path": "path.to.new_engine.instance",
+    #     "model_path": "path.to.new_engine.NewEngineTTSRequest",
+    #     "param_field_name": "new_engine_params"
+    # }
 }
+
+def _import_from_string(path: str):
+    """Dynamically imports an object from a string path like 'module.submodule.object'."""
+    module_path, object_name = path.rsplit('.', 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, object_name)
+
+# Dynamically build the ENGINE_REGISTRY. This registry will only contain engines that were successfully imported.
+ENGINE_REGISTRY: dict[str, EngineDefinition] = {}
+
+logging.info("Discovering and registering available TTS engines...")
+for name, config in SUPPORTED_ENGINES.items():
+    try:
+        # Attempt to import the engine instance and its request model
+        engine_instance = _import_from_string(config["engine_path"])
+        request_model = _import_from_string(config["model_path"])
+
+        # If both imports succeed, add the engine to our live registry
+        ENGINE_REGISTRY[name] = EngineDefinition(
+            instance=engine_instance,
+            request_model=request_model,
+            param_field_name=config["param_field_name"]
+        )
+        logging.info(f"Successfully registered engine: '{name}'")
+    except (ImportError, AttributeError) as e:
+        # This is the graceful guard. If a module or object doesn't exist, we log
+        # it and move on without crashing the application.
+        logging.warning(f"Could not register engine '{name}'. It will be unavailable. Reason: {e}")
 
 MEDIA_TYPES = {
     ExportFormat.MP3: "audio/mpeg",
@@ -49,17 +82,20 @@ async def lifespan(app: FastAPI):
     logging.info("Application startup...")
     # Selectively load models based on the ENABLED_MODELS setting
     enabled_engine_count = 0
+    available_engines = list(ENGINE_REGISTRY.keys())
+    logging.info(f"Discovered engines available for loading: {available_engines}")
+
     for engine_name in settings.ENABLED_MODELS:
         if engine_name in ENGINE_REGISTRY:
             try:
                 logging.info(f"Loading '{engine_name}' engine...")
-                ENGINE_REGISTRY[engine_name].instance.load_model() 
+                ENGINE_REGISTRY[engine_name].instance.load_model()
                 enabled_engine_count += 1
             except Exception as e:
                 logging.error(f"Failed to load '{engine_name}' engine: {e}", exc_info=True)
         else:
-            logging.warning(f"Configuration requests to enable '{engine_name}', but no such engine is registered.")
-    
+            logging.warning(f"Configuration requests to enable '{engine_name}', but no such engine is registered or available.")
+
     logging.info(f"Startup complete. {enabled_engine_count} TTS engine(s) loaded.")
     yield
     logging.info("Application shutdown.")
@@ -78,25 +114,26 @@ def dynamic_request_parser():
     """
     async def dependency(engine_name: str, req_json: str = Form(..., alias="req_json")) -> BaseTTSRequest:
         if engine_name not in ENGINE_REGISTRY:
-            # This check is technically redundant if the endpoint does it first,
-            # but it's good practice for a self-contained dependency.
-            raise HTTPException(status_code=404, detail=f"Engine '{engine_name}' not found.")
-        
+            raise HTTPException(
+                status_code=404,
+                detail=f"Engine '{engine_name}' not found. Available engines: {list(ENGINE_REGISTRY.keys())}"
+            )
+
         # Look up the correct Pydantic model from our central registry
         model_class = ENGINE_REGISTRY[engine_name].request_model
-        
+
         try:
             model_data = json.loads(req_json)
             return model_class.model_validate(model_data)
         except json.JSONDecodeError:
             raise HTTPException(
-                status_code=422, 
+                status_code=422,
                 detail="Invalid JSON format in the 'req_json' form field."
             )
         except ValidationError as e:
             raise HTTPException(
                 status_code=422,
-                detail=e.errors() 
+                detail=e.errors()
             )
     return dependency
 
@@ -113,19 +150,19 @@ async def get_engine_config(engine_name: str):
     """
     if engine_name not in ENGINE_REGISTRY:
         raise HTTPException(
-            status_code=404, 
+            status_code=404,
             detail=f"Engine '{engine_name}' not found. Available engines: {list(ENGINE_REGISTRY.keys())}"
         )
 
     engine_def = ENGINE_REGISTRY[engine_name]
-    
+
     # Create a model instance without validation. This is the correct
     # tool to create a template object. It will have all default fields populated.
     default_payload_obj = engine_def.request_model.model_construct(
         # Set the required 'text' field so the output is a valid template.
         text="Your text to synthesize goes here."
         )
-    
+
     # Dump the model to a dictionary, making sure to include unset fields.
     payload_dict = default_payload_obj.model_dump(exclude_unset=False)
 
@@ -133,7 +170,7 @@ async def get_engine_config(engine_name: str):
     return JSONResponse(content=payload_dict)
 
 @app.post(
-    "/{engine_name}/generate", 
+    "/{engine_name}/generate",
     summary="Generate Speech with a Specific Engine",
     tags=["Generation"]
 )
@@ -144,19 +181,25 @@ async def generate_speech(
 ):
     """
     Generate speech from text using the specified TTS engine.
-    
+
     - **engine_name**: The name of the engine to use (e.g., 'chatterbox').
-    - **req_json**: A form field containing the JSON payload for the request. 
+    - **req_json**: A form field containing the JSON payload for the request.
       Use the `/engines/{engine_name}/config` endpoint to get a template.
     - **ref_audio**: A file upload, required for voice cloning engines.
-    
+
     Some engines may return engine-specific data in the `X-Generation-Metadata`
     response header as a JSON string.
     """
+    if engine_name not in ENGINE_REGISTRY:
+         raise HTTPException(
+            status_code=404,
+            detail=f"Engine '{engine_name}' not found. Available engines: {list(ENGINE_REGISTRY.keys())}"
+        )
+
     if engine_name not in settings.ENABLED_MODELS:
         raise HTTPException(
-            status_code=503, 
-            detail=f"The '{engine_name}' engine is not enabled on this server."
+            status_code=503,
+            detail=f"The '{engine_name}' engine is installed but not enabled on this server. Enabled engines: {settings.ENABLED_MODELS}"
         )
 
     try:
@@ -166,24 +209,24 @@ async def generate_speech(
         ref_audio_data = await ref_audio.read() if ref_audio else None
 
         synthesis_result = generate_speech_from_request(
-            req=req, 
-            engine=engine_def.instance, 
+            req=req,
+            engine=engine_def.instance,
             engine_params=engine_params,
             ref_audio_data=ref_audio_data
         )
-        
+
         media_type = MEDIA_TYPES.get(
-            req.post_processing.export_format, 
+            req.post_processing.export_format,
             "application/octet-stream"
         )
-        
+
         # Prepare the response and add the generic metadata header if it exists
         response = StreamingResponse(synthesis_result.audio_buffer, media_type=media_type)
         if synthesis_result.metadata:
             metadata_json = json.dumps(synthesis_result.metadata)
             response.headers["X-Generation-Metadata"] = metadata_json
             logging.info(f"Returning generation metadata in header: {metadata_json}")
-        
+
         return response
 
     except InvalidVoiceTokenException as e:
@@ -199,4 +242,8 @@ async def generate_speech(
 
 @app.get("/health", summary="Check API Health", tags=["Management"])
 async def health_check():
-    return {"status": "ok", "enabled_models": settings.ENABLED_MODELS}
+    return {
+        "status": "ok",
+        "registered_engines": list(ENGINE_REGISTRY.keys()), # More informative health check
+        "enabled_models": settings.ENABLED_MODELS
+    }
