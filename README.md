@@ -12,249 +12,287 @@ This example shows all available parameters with detailed comments. You can sele
 
 ```jsonc
 {
-  // This document outlines the complete JSON request payload for the Pluggable TTS API.
-  // This JSON object should be sent as a string within a 'multipart/form-data' field named 'req_json'.
+  // This document outlines the complete JSON request payload for the
+  // Pluggable TTS API.
+  // This JSON object should be sent as a string within a
+  // 'multipart/form-data' field named 'req_json'.
   //
-  // For voice cloning, a reference audio file should be sent in a separate form field named 'ref_audio'.
+  // For voice cloning, a reference audio file should be sent in a separate
+  // form field named 'ref_audio'.
   //
   // The structure is divided into logical groups:
-  // 1. Core Generation Settings: Top-level controls for the generation process.
-  // 2. Text Processing: How the input text is cleaned, normalized, and split into chunks.
-  // 3. Validation: Rules to ensure the quality of each generated audio chunk before it's accepted.
-  // 4. Post-Processing: How accepted audio chunks are assembled, enhanced, and encoded into the final file.
-  // 5. Engine-Specific Parameters: Settings unique to the selected TTS engine (e.g., 'chatterbox_params').
+  // 1. Core Generation Settings: Top-level controls for the generation
+  //    process.
+  // 2. Text Processing: How the input text is cleaned, normalized, and
+  //    split into chunks.
+  // 3. Validation: Rules to ensure the quality of each generated audio
+  //    chunk before it's accepted.
+  // 4. Post-Processing: How accepted audio chunks are assembled, enhanced,
+  //    and encoded into the final file.
+  // 5. Engine-Specific Parameters: Settings unique to the selected TTS
+  //    engine (e.g., 'chatterbox_params').
   //
-  // This example uses the 'chatterbox' engine. To use another engine like 'fish_speech',
-  // replace the 'chatterbox_params' object with 'fish_speech_params' and its corresponding settings.
+  // This example uses the 'chatterbox' engine. To use another engine like
+  // 'fish_speech', replace the 'chatterbox_params' object with
+  // 'fish_speech_params' and its corresponding settings.
 
   // -------------------------------------------
   // --- 1. Core Generation Settings         ---
   // -------------------------------------------
-  // Top-level controls governing the overall synthesis process, including text input,
-  // randomness, retries, and quality-improvement strategies.
+  // Top-level controls governing the overall synthesis process, including
+  // text input, randomness, retries, and quality-improvement strategies.
 
-  "text": "Your text to be converted to speech goes here. This can be a long paragraph, or even multiple paragraphs.",
+  "text": "Your text to be converted to speech goes here.",
   // The text to be converted to speech. This is the only required field.
 
   "seed": 0,
-  // Random seed for reproducibility. If a single integer is provided, it's used as the base for all generations.
-  // A list of integers can be provided (e.g., [123, 456]) to set a specific seed for each 'best_of' candidate.
-  // A seed of 0 means a random seed will be used for each generation, making results non-deterministic.
+  // Random seed for reproducibility. If a single integer is provided, it's
+  // used as the base for all generations. A list of integers can be
+  // provided (e.g., [123, 456]) to set a specific seed for each 'best_of'
+  // candidate. A seed of 0 means a random seed will be used for each
+  // generation, making results non-deterministic.
 
   "best_of": 1,
-  // Generates this many audio candidates for each text chunk and automatically returns the one with the
-  // highest speech-to-audio-duration ratio (i.e., the least silence/noise).
-  // A value > 1 can significantly improve quality and robustness at the cost of longer processing time. (Range: 1-10)
+  // Generates this many audio candidates for each text chunk and
+  // automatically returns the one with the highest speech-to-audio-duration
+  // ratio (i.e., the least silence/noise). A value > 1 can significantly
+  // improve quality and robustness at the cost of longer processing time.
+  // (Range: 1-10)
 
   "max_retries": 1,
-  // For each text chunk, if a generation attempt fails validation (e.g., produces silence, distorted audio, or is truncated),
-  // the API will retry the generation this many times with a new random seed. (Range: 0-10)
+  // For each text chunk, if a generation attempt fails validation (e.g.,
+  // produces silence, distorted audio, or is truncated), the API will
+  // retry the generation this many times with a new random seed.
+  // (Range: 0-10)
 
   // -------------------------------------------
   // --- 2. Text Processing                  ---
   // -------------------------------------------
-  // Controls for how the raw input text is pre-processed before being sent to the TTS model.
-  // This includes cleaning, normalization, and splitting the text into manageable chunks for generation.
+  // Controls for how the raw input text is pre-processed before being sent
+  // to the TTS model. This includes cleaning, normalization, and splitting
+  // the text into manageable chunks for generation.
   "text_processing": {
     "text_language": "en",
-    // Language code (e.g., 'en', 'de', 'es') used for language-specific text processing like
-    // sentence segmentation and number normalization.
+    // Language code (e.g., 'en', 'de', 'es') used for language-specific
+    // text processing like sentence segmentation and number normalization.
 
     "to_lowercase": false,
     // If true, converts all input text to lowercase before processing.
 
     "remove_bracketed_text": false,
-    // If true, removes all text found inside brackets [] and parentheses (). Useful for stripping annotations.
+    // If true, removes text inside brackets [] and parentheses ().
+    // Useful for stripping annotations.
 
     "use_nemo_normalizer": false,
-    // If true, uses the powerful NeMo text normalizer to convert numbers, dates, currencies, etc., into their full word forms
-    // (e.g., '$10.50' becomes 'ten dollars and fifty cents'). Requires the 'en' language.
+    // If true, uses the NeMo text normalizer to convert numbers, dates,
+    // currencies, etc., into their full word forms (e.g., '$10.50' becomes
+    // 'ten dollars and fifty cents'). Requires the 'en' language.
 
     "apply_advanced_cleaning": false,
-    // If true, applies a set of advanced, heuristic cleaning rules. This includes removing stutters (e.g., 'b-but'),
-    // normalizing emphasis markers (e.g., '*word*'), and other common text artifacts.
+    // If true, applies advanced, heuristic cleaning rules. This includes
+    // removing stutters (e.g., 'b-but'), normalizing emphasis markers
+    // (e.g., '*word*'), and other common text artifacts.
 
     "chunking_strategy": "paragraph",
-    // The method used to split the input text into smaller chunks for the TTS engine.
-    // 'paragraph': Keeps paragraphs whole. Long paragraphs are split using the 'balanced' strategy. (Recommended)
-    // 'balanced':  Optimally splits sentences to create chunks of similar, ideal length.
-    // 'greedy':    Quickly groups sentences into chunks without balancing length.
-    // 'simple':    Force-splits text by character length, ignoring sentence boundaries.
+    // Method to split input text into smaller chunks for the TTS engine.
+    // 'paragraph': Keeps paragraphs whole. Long paragraphs are split using
+    //              the 'balanced' strategy. (Recommended)
+    // 'balanced':  Optimally splits sentences to create chunks of similar,
+    //              ideal length.
+    // 'greedy':    Quickly groups sentences into chunks without balancing.
+    // 'simple':    Force-splits text by character length, ignoring sentence
+    //              boundaries.
 
     "shortness_penalty_factor": 2.0,
-    // Used by the 'balanced' chunking strategy. A higher value more aggressively penalizes the creation of
-    // very short chunks, preferring to create slightly more uneven but longer chunks. (Min: 1.0)
+    // Used by 'balanced' chunking. A higher value more aggressively
+    // penalizes very short chunks, preferring more uneven but longer chunks.
+    // (Min: 1.0)
 
     "ideal_chunk_length": 300,
-    // The target character length for chunks when using the 'balanced' strategy. (Range: 50-1000)
+    // The target character length for chunks when using the 'balanced'
+    // strategy. (Range: 50-1000)
 
     "max_chunk_length": 500
-    // The absolute maximum character length for any single text chunk. Text will be forcibly split if it exceeds this. (Range: 50-1000)
+    // The absolute maximum character length for any single text chunk. Text
+    // will be forcibly split if it exceeds this. (Range: 50-1000)
   },
 
   // -------------------------------------------
   // --- 3. Validation                       ---
   // -------------------------------------------
-  // A pipeline of checks performed on each generated audio chunk. If a chunk fails validation, it is discarded
-  // and a retry is attempted (up to 'max_retries'). This is critical for catching common model failure modes.
+  // A pipeline of checks performed on each generated audio chunk. If a chunk
+  // fails validation, it is discarded and a retry is attempted (up to
+  // 'max_retries'). This is critical for catching model failure modes.
   "validation": {
     // --- Silence & Truncation Validation ---
     "max_silence_dbfs": -60.0,
-    // Fails generation if the overall energy (RMS) of the raw audio is below this level in dBFS.
-    // This effectively catches completely silent or dead outputs. Set to null to disable.
+    // Fails generation if the overall energy (RMS) of the raw audio is
+    // below this level in dBFS. Catches silent outputs. Null to disable.
 
     "max_contiguous_silence_s": 2.8,
-    // Fails generation if any silent gap *within* a single generated chunk is longer than this duration in seconds.
-    // Catches outputs where the model stops speaking midway through. Set to null to disable.
+    // Fails if any silent gap *within* a chunk is longer than this.
+    // Catches outputs where the model stops speaking midway. Null to disable.
 
     // --- Speech Duration Validation (Syllable-based) ---
-    // This group of settings ensures the generated speech has a reasonable length relative to the input text's syllable count.
-    // It is highly effective at catching truncated (cut-off) or rambling (hallucinated) audio.
+    // Ensures generated speech has a reasonable length relative to the
+    // input text's syllable count. Effective at catching truncated
+    // (cut-off) or rambling (hallucinated) audio.
     "min_voiced_duration_per_syllable": 0.150,
-    // Fails if total speech duration is less than (this value * syllable_count). Catches truncated audio.
-    // Set to null to disable. (Range: 0.0-2.0)
+    // Fails if speech duration is less than (this value * syllable_count).
+    // Catches truncated audio. Set to null to disable. (Range: 0.0-2.0)
 
     "max_voiced_duration_per_syllable": 0.350,
-    // Fails if total speech duration is more than (this value * syllable_count). Catches hallucinated audio.
-    // Set to null to disable. (Range: 0.0-5.0)
+    // Fails if speech duration is more than (this value * syllable_count).
+    // Catches hallucinated audio. Set to null to disable. (Range: 0.0-5.0)
 
     "min_syllables_for_duration_validation": 7,
-    // Disables the min/max duration-per-syllable checks if the text chunk has fewer syllables than this value.
-    // Prevents false failures on very short phrases like 'Okay.' or 'Yes.'. Set to null to always run.
+    // Disables duration-per-syllable checks if a chunk has fewer syllables
+    // than this. Prevents failures on short phrases like 'Okay.' or 'Yes.'.
+    // Set to null to always run.
 
     // --- Advanced Duration Analysis for Complex Words ---
-    // This allows for long, drawn-out words (e.g., 'Ahhhhhh', 'Whoooooosh') without failing validation.
+    // Allows for long, drawn-out words (e.g., 'Ahhhhhh') without failing
+    // validation.
     "use_word_level_duration_analysis": true,
-    // If true, analyzes each word in the text to identify 'low-complexity' words (like onomatopoeia).
-    // These words are then given a more relaxed maximum duration budget.
+    // If true, analyzes words to identify 'low-complexity' words (like
+    // onomatopoeia), which get a more relaxed max duration budget.
 
     "min_word_len_for_low_complexity_analysis": 7,
-    // A word must have at least this many characters to be considered for low-complexity analysis.
-    // This avoids misclassifying common short words.
+    // A word must have at least this many characters to be considered for
+    // low-complexity analysis.
 
     "low_complexity_log_variety_threshold": 1.6,
-    // The threshold for identifying a low-complexity word (unique_chars / log(word_length)).
-    // A lower value means a word needs to be more repetitive to be classified as low-complexity.
+    // Threshold for identifying a low-complexity word. A lower value means
+    // a word needs to be more repetitive to be classified as low-complexity.
 
     "low_complexity_max_duration_per_syllable": 0.600,
-    // The relaxed maximum duration per syllable budget applied to words identified as low-complexity.
+    // Relaxed maximum duration per syllable for low-complexity words.
 
     // --- Audio Quality Validation ---
     "max_clipping_percentage": 0.1,
-    // Fails if more than this percentage of audio samples are clipped (at max/min amplitude).
-    // Catches distorted or overly loud outputs. Set to null to disable.
+    // Fails if more than this percentage of audio samples are clipped.
+    // Catches distorted outputs. Set to null to disable.
 
     "min_spectral_centroid_std_dev": 1800.0,
-    // Fails if the standard deviation of the audio's spectral centroid is below this value.
-    // This is a technical measure that is effective at catching monotonous, robotic, or noisy outputs. Set to null to disable.
+    // Fails if the standard deviation of the spectral centroid is too low.
+    // Catches monotonous, robotic, or noisy outputs. Null to disable.
 
     "min_syllables_for_spectral_validation": 7
-    // Disables the spectral centroid check if the text chunk has fewer syllables than this value.
-    // Prevents false failures on short, naturally monotonous phrases. Set to null to always run.
+    // Disables the spectral centroid check for chunks with few syllables.
+    // Prevents failures on short, naturally monotonous phrases.
   },
 
   // -------------------------------------------
   // --- 4. Post-Processing                  ---
   // -------------------------------------------
-  // Controls for how the validated audio chunks are stitched together, cleaned, normalized, and
-  // exported into the final audio file.
+  // Controls for how validated audio chunks are stitched together, cleaned,
+  // normalized, and exported into the final audio file.
   "post_processing": {
     // --- VAD-based Denoising & Filtering ---
     "denoise_with_vad": true,
-    // Master switch to enable Voice Activity Detection (VAD) for cleaning up audio. VAD identifies and keeps only the speech portions of the generated audio.
+    // Master switch for Voice Activity Detection (VAD) to clean audio. VAD
+    // identifies and keeps only the speech portions of the audio.
 
     "vad_threshold": 0.5,
-    // The confidence threshold (0.0 to 1.0) for the VAD to classify a segment as speech.
+    // Confidence threshold (0.0 to 1.0) for VAD to classify a segment as
+    // speech.
 
     "vad_min_silence_ms": 100,
-    // The minimum duration of silence (ms) required between speech segments for them to be considered separate.
+    // Min duration of silence (ms) between speech segments.
 
     "vad_min_speech_ms": 250,
-    // Any detected speech segment shorter than this duration (ms) will be discarded as noise.
+    // Speech segments shorter than this duration (ms) are discarded.
 
     "vad_speech_pad_ms": 50,
-    // Padding (ms) added to the start and end of each detected speech segment to avoid clipping words.
+    // Padding (ms) added to the start/end of each speech segment.
 
     "vad_fade_ms": 10,
-    // Duration (ms) of a gentle fade-in/out applied to the edges of speech segments for smoother transitions.
+    // Duration (ms) of fade-in/out applied to speech segments.
 
     "max_voiced_dynamic_range_db": 20.0,
-    // After VAD, if a voiced segment's RMS energy is this many dB quieter than the loudest segment, it is filtered out as noise.
-    // Set to null to disable.
+    // After VAD, if a voiced segment's RMS is this many dB quieter than
+    // the loudest segment, it is filtered out. Set to null to disable.
 
     // --- Silence & Pacing Control ---
     "trim_segment_silence": true,
-    // If true, trims leading/trailing silence from each audio chunk before they are stitched together.
-    // This is recommended when manually setting inter-segment silences below.
+    // If true, trims leading/trailing silence from each audio chunk before
+    // they are stitched together.
 
     "inter_segment_silence_sentence_ms": 200,
-    // Duration of silence (ms) to insert between audio chunks that represent sentences within the same paragraph.
+    // Silence (ms) between chunks representing sentences in one paragraph.
 
     "inter_segment_silence_paragraph_ms": 600,
-    // Duration of silence (ms) to insert between audio chunks that represent paragraph breaks.
+    // Silence (ms) between chunks representing paragraph breaks.
 
     "inter_segment_silence_fallback_ms": 150,
-    // Duration of silence (ms) to insert between audio chunks that were split due to length, not a natural sentence/paragraph break.
+    // Fallback silence (ms) for chunks split by length, not by sentence.
 
     // --- Normalization & Final Touches ---
     "normalize_audio": true,
     // If true, normalizes the final audio loudness using ffmpeg.
 
     "normalize_method": "ebu",
-    // The normalization method to use. 'ebu' (EBU R128) is recommended for consistent loudness. 'peak' normalizes to a peak level.
+    // Normalization method. 'ebu' (EBU R128) for consistent loudness or
+    // 'peak' for a specific peak level.
 
     "normalize_level": -18.0,
-    // The target loudness level. For 'ebu', this is in LUFS. For 'peak', this is in dBFS.
+    // Target loudness level. In LUFS for 'ebu', in dBFS for 'peak'.
 
     "lead_in_silence_ms": null,
-    // Desired duration of silence (ms) at the absolute beginning of the final audio file.
-    // A null value preserves the natural silence. A value of 0 trims all lead-in silence.
+    // Desired duration of silence (ms) at the start of the final file.
+    // Null preserves natural silence; 0 trims it.
 
     "lead_out_silence_ms": null,
-    // Desired duration of silence (ms) at the absolute end of the final audio file.
-    // A null value preserves the natural silence. A value of 0 trims all lead-out silence.
+    // Desired duration of silence (ms) at the end of the final file.
+    // Null preserves natural silence; 0 trims it.
 
     "export_format": "mp3"
-    // The format of the final audio file. Options: "mp3", "wav", "flac".
+    // Final audio format. Options: "mp3", "wav", "flac".
   },
 
 
   // -------------------------------------------
   // --- 5. Engine-Specific Parameters       ---
   // -------------------------------------------
-  // Parameters that are unique to the 'chatterbox' TTS engine.
-  // The key of this object MUST match the engine name in the URL (e.g., /chatterbox/generate).
+  // Parameters unique to the 'chatterbox' TTS engine. The key of this
+  // object MUST match the engine name in the URL (e.g., /chatterbox/generate).
   "chatterbox_params": {
     "exaggeration": 0.5,
     // Emotion exaggeration factor for the cloned voice. (Range: 0.0-2.0)
 
     "temperature": 0.8,
-    // Generation temperature. Higher values result in more random and varied speech. (Range: 0.01-5.0)
+    // Generation temperature. Higher values -> more random speech.
+    // (Range: 0.01-5.0)
 
     "cfg_weight": 0.5,
-    // Classifier-Free Guidance weight. Influences how closely the generation adheres to the prompt. (Range: 0.0-1.0)
+    // Classifier-Free Guidance weight. Influences how closely the
+    // generation adheres to the prompt. (Range: 0.0-1.0)
 
     "disable_watermark": true,
     // If true, disables Chatterbox's built-in audio watermark.
 
     "use_analyzer": false,
-    // If true, enables an experimental alignment analyzer which can improve quality and robustness but may fail on some inputs.
+    // If true, enables an experimental analyzer which can improve quality
+    // but may fail on some inputs.
 
     "voice_cache_token": null
-    // A token representing a server-side cached voice. If you provide a valid token, the 'ref_audio' file is ignored.
-    // The server returns a 'voice_cache_token' in the 'X-Generation-Metadata' response header after a successful generation
-    // with a new reference audio. Re-using this token is much faster than re-uploading the same audio file.
+    // A token for a server-side cached voice. If provided, 'ref_audio' is
+    // ignored. The server returns a 'voice_cache_token' in the response
+    // header after a successful generation with new reference audio.
+    // Re-using this token is much faster than re-uploading the same file.
   }
 
   // --- Example for 'fish_speech' engine ---
-  // To use the 'fish_speech' engine, you would replace the 'chatterbox_params' object above with this one:
+  // To use the 'fish_speech' engine, you would replace the
+  // 'chatterbox_params' object above with this one:
   /*
   "fish_speech_params": {
     "temperature": 0.8,         // Generation temperature. (Range: 0.01-2.0)
-    "top_p": 0.8,               // Top-P (nucleus) sampling threshold. (Range: 0.0-1.0)
-    "repetition_penalty": 1.1,  // Penalty for repeating tokens. (Range: 1.0-2.0)
-    "max_new_tokens": 1024,     // Maximum number of semantic tokens to generate per chunk. (Range: 1-4096)
-    "voice_cache_token": null   // Token for a server-side cached voice (encoded reference audio).
+    "top_p": 0.8,               // Top-P (nucleus) sampling. (Range: 0.0-1.0)
+    "repetition_penalty": 1.1,  // Penalty for repeating. (Range: 1.0-2.0)
+    "max_new_tokens": 1024,     // Max semantic tokens per chunk. (1-4096)
+    "ref_text": null,           // The transcription of the reference audio.
+    "voice_cache_token": null   // Token for a server-side cached voice.
   }
   */
 }
