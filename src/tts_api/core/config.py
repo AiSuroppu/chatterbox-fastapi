@@ -47,13 +47,22 @@ class Settings(BaseSettings):
     # Path to the Text-to-Semantic (T2S) model checkpoint directory.
     FISHSPEECH_T2S_CHECKPOINT_PATH: str = "vendor/fish_speech/checkpoints/openaudio-s1-mini"
     # Path to the vocoder/decoder model checkpoint file.
-    FISHSPEECH_DECODER_CHECKPOINT_PATH: str = "vendor/fish_speech/checkpoints/openaudio-s1-mini/model.pth"
+    FISHSPEECH_DECODER_CHECKPOINT_PATH: str = "vendor/fish_speech/checkpoints/openaudio-s1-mini/codec.pth"
     # The configuration name for the vocoder/decoder model.
     FISHSPEECH_DECODER_CONFIG_NAME: str = "modded_dac_vq"
     # Enable PyTorch 2.0+ model compilation for the T2S model.
     FISHSPEECH_COMPILE: bool = False
     # Maximum number of cached reference voices (prompt tokens) to keep in memory.
     FISHSPEECH_VOICE_CACHE_SIZE: int = 10
+    # Offload the Text-to-Semantic (LLaMA-based) model to the CPU when not in use to save VRAM.
+    FISHSPEECH_OFFLOAD_T2S_MODEL: bool = False
+    # Offload the Vocoder/Decoder (DAC) model to the CPU when not in use to save VRAM.
+    FISHSPEECH_OFFLOAD_DECODER_MODEL: bool = False
+    # Mini-batch size for the Text-to-Semantic (LLaMA) model.
+    # NOTE: The current engine implementation does not support batching for this model yet.
+    FISHSPEECH_T2S_BATCH_SIZE: int = 1
+    # Mini-batch size for the vocoder/decoder model.
+    FISHSPEECH_DECODER_BATCH_SIZE: int = 1
 
     class Config:
         env_file = ".env"

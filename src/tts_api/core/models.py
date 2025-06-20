@@ -153,8 +153,8 @@ class FishSpeechParams(BaseModel):
     top_p: float = Field(0.8, ge=0.0, le=1.0, description="Top-P sampling threshold.")
     repetition_penalty: float = Field(1.1, ge=1.0, le=2.0, description="Penalty for repeating tokens.")
     max_new_tokens: int = Field(1024, ge=1, le=4096, description="Maximum number of semantic tokens to generate per chunk.")
-    voice_cache_token: Optional[str] = Field(
-        None, description="A token for a server-side cached voice (encoded reference audio).")
+    ref_text: Optional[str] = Field(None, description="The transcription of the reference audio. Required for voice cloning.")
+    voice_cache_token: Optional[str] = Field(None, description="A token for a server-side cached voice (encoded reference audio).")
 
 class FishSpeechTTSRequest(BaseTTSRequest):
     """The complete request model for the FishSpeech engine endpoint."""
