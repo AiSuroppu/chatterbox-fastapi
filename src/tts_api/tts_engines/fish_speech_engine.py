@@ -101,6 +101,7 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
     def _create_prompt_tokens_from_data(self, ref_audio_data: bytes) -> torch.Tensor:
         """Encodes reference audio bytes into semantic tokens (the 'voice embedding')."""
         with torch.inference_mode(), \
+             model_context(self._t2s_model, self._t2s_offload_device, settings.FISHSPEECH_OFFLOAD_T2S_MODEL), \
              model_context(self._decoder_model, settings.DEVICE, settings.FISHSPEECH_OFFLOAD_DECODER_MODEL):
 
             audio_tensor = self.load_audio(ref_audio_data, self.sample_rate)
@@ -149,9 +150,7 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
             if not params.ref_text:
                 raise ValueError("Reference audio was provided, but the required 'ref_text' (transcription) is missing in the request.")
 
-            # Ensure T2S model is on CPU while vocoder is active for voice embedding
-            with model_context(self._t2s_model, self._t2s_offload_device, settings.FISHSPEECH_OFFLOAD_T2S_MODEL):
-                prompt_tokens = self._create_prompt_tokens_from_data(ref_audio_data)
+            prompt_tokens = self._create_prompt_tokens_from_data(ref_audio_data)
             
             if self._voice_cache is not None:
                 # The token must be a composite of audio and text to be unique
@@ -195,8 +194,8 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
 
         all_semantic_codes = []
         with torch.inference_mode(), \
-             model_context(self._t2s_model, settings.DEVICE, settings.FISHSPEECH_OFFLOAD_T2S_MODEL), \
-             model_context(self._decoder_model, self._decoder_offload_device, settings.FISHSPEECH_OFFLOAD_DECODER_MODEL):
+             model_context(self._decoder_model, self._decoder_offload_device, settings.FISHSPEECH_OFFLOAD_DECODER_MODEL), \
+             model_context(self._t2s_model, settings.DEVICE, settings.FISHSPEECH_OFFLOAD_T2S_MODEL):
 
             logging.info(f"Generating semantic codes for {len(text_chunks)} chunks with T2S model...")
             # This outer loop respects the batch size setting, even if the inner loop is sequential.
@@ -243,8 +242,8 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
 
         # Ensure Decoder is on GPU and T2S is on CPU for this phase
         with torch.inference_mode(), \
-             model_context(self._decoder_model, settings.DEVICE, settings.FISHSPEECH_OFFLOAD_DECODER_MODEL), \
-             model_context(self._t2s_model, self._t2s_offload_device, settings.FISHSPEECH_OFFLOAD_T2S_MODEL):
+             model_context(self._t2s_model, self._t2s_offload_device, settings.FISHSPEECH_OFFLOAD_T2S_MODEL), \
+             model_context(self._decoder_model, settings.DEVICE, settings.FISHSPEECH_OFFLOAD_DECODER_MODEL):
 
             logging.info(f"Decoding {len(valid_codes_with_indices)} semantic code sequences in batches of up to {decoder_batch_size}.")
             
