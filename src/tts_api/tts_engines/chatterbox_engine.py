@@ -9,7 +9,7 @@ from chatterbox.tts import ChatterboxTTS
 
 from tts_api.core.config import settings
 from tts_api.core.models import ChatterboxParams
-from tts_api.core.exceptions import InvalidVoiceTokenException
+from tts_api.core.exceptions import InvalidVoiceTokenException, ClientRequestError, EngineExecutionError, EngineLoadError
 from tts_api.tts_engines.base import AbstractTTSEngine
 
 def _noop_watermark(wav, sample_rate):
@@ -36,8 +36,7 @@ class ChatterboxEngine(AbstractTTSEngine):
                 self._model = ChatterboxTTS.from_pretrained(device=settings.DEVICE, compile_mode=compile_mode)
                 logging.info(f"Chatterbox model loaded on device: {settings.DEVICE}")
             except Exception as e:
-                logging.critical(f"Failed to load Chatterbox model: {e}", exc_info=True)
-                raise
+                raise EngineLoadError(f"Failed to load Chatterbox model: {e}") from e
 
     def _create_embedding_from_data(self, ref_audio_data: bytes, exaggeration: float):
         """Helper to create a voice embedding from raw audio bytes."""
@@ -114,7 +113,7 @@ class ChatterboxEngine(AbstractTTSEngine):
             return generation_kwargs, response_metadata
 
         # Case 3: Client provides neither a token nor reference audio. This is a clear client error.
-        raise ValueError("Chatterbox is a voice cloning engine and requires either a `ref_audio` file or a valid `voice_cache_token`.")
+        raise ClientRequestError("Chatterbox is a voice cloning engine and requires either a `ref_audio` file or a valid `voice_cache_token`.")
 
     @property
     def sample_rate(self) -> int:
@@ -124,12 +123,11 @@ class ChatterboxEngine(AbstractTTSEngine):
 
     def generate(self, text_chunks: List[str], params: ChatterboxParams, **kwargs) -> List[torch.Tensor]:
         if self._model is None:
-            raise RuntimeError("Cannot generate audio, model is not loaded.")
+            raise EngineExecutionError("Cannot generate audio, Chatterbox model is not loaded.")
         
         voice_embedding_cache = kwargs.get("voice_embedding_cache")
         if not voice_embedding_cache:
-            # This should not happen if prepare_generation is called correctly.
-            raise ValueError("`generate` was called without a `voice_embedding_cache`. This indicates a service-layer error.")
+            raise EngineExecutionError("`generate` was called without a `voice_embedding_cache`. This indicates a service-layer error.")
 
         original_watermark_method = None
         try:
@@ -154,7 +152,9 @@ class ChatterboxEngine(AbstractTTSEngine):
                 all_waveforms = [all_waveforms]  # Ensure we always have a list
             
             return all_waveforms
-
+        except Exception as e:
+            # Catch any unexpected error from the underlying library and wrap it.
+            raise EngineExecutionError(f"Chatterbox model failed during generation: {e}") from e
         finally:
             if original_watermark_method:
                 self._model.watermarker.apply_watermark = original_watermark_method

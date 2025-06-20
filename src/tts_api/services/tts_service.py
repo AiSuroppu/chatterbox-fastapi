@@ -9,6 +9,7 @@ from collections import defaultdict
 from enum import Enum, auto
 
 from tts_api.core.models import BaseTTSRequest, PostProcessingOptions
+from tts_api.core.exceptions import ClientRequestError, EngineExecutionError
 from tts_api.tts_engines.base import AbstractTTSEngine
 from tts_api.services.text_processing import process_and_chunk_text, TextChunk, BoundaryType
 from tts_api.services.audio_processor import post_process_audio, get_speech_timestamps, calculate_speech_ratio_from_timestamps
@@ -191,7 +192,7 @@ def generate_speech_from_request(
         text=req.text, options=req.text_processing
     )
     if not input_segments:
-        raise ValueError("No text to synthesize after processing.")
+        raise ClientRequestError("No text to synthesize after processing. The input may be empty or contain only removable characters.")
     
     generation_kwargs, response_metadata = engine.prepare_generation(
         params=engine_params,
@@ -309,14 +310,14 @@ def generate_speech_from_request(
     for i, segment_info in enumerate(input_segments):
         candidates_for_segment = [job for job in successful_jobs if job.segment_idx == i]
         if not candidates_for_segment:
-            raise ValueError(f"TTS failed to produce any valid candidates for segment {i+1}: '{segment_info.text[:50]}...'")
+            raise EngineExecutionError(f"TTS failed to produce any valid candidates for segment {i+1}: '{segment_info.text[:50]}...'. This may be due to an issue with the model or invalid input text for the model.")
         
         best_job = max(candidates_for_segment, key=lambda j: j.result.score)
         final_segments.append(best_job.result)
         logging.info(f"Selected best candidate for segment {i+1} (score: {best_job.result.score:.4f}, seed: {best_job.current_seed})")
 
     if not final_segments:
-        raise ValueError("TTS generation failed to produce any audio.")
+        raise EngineExecutionError("TTS generation failed to produce any audio.")
 
     # Use the new assembly helper function
     final_waveform = _assemble_final_waveform(
@@ -328,7 +329,7 @@ def generate_speech_from_request(
 
 
     if final_waveform is None or final_waveform.numel() == 0:
-        raise ValueError("TTS generation failed to produce any final audio after assembly.")
+        raise EngineExecutionError("TTS generation failed to produce any final audio after assembly.")
 
     audio_buffer = post_process_audio(
         final_waveform,

@@ -5,11 +5,16 @@ from dataclasses import dataclass
 from typing import Type, Optional
 from pydantic import BaseModel, ValidationError
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Body, File, UploadFile, Form, Depends
+from fastapi import FastAPI, HTTPException, Body, File, UploadFile, Form, Depends, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from tts_api.core.config import settings
-from tts_api.core.exceptions import InvalidVoiceTokenException
+from tts_api.core.exceptions import (
+    ClientRequestError,
+    EngineExecutionError,
+    EngineLoadError,
+    InvalidVoiceTokenException
+)
 from tts_api.core.models import BaseTTSRequest, ExportFormat
 from tts_api.tts_engines.base import AbstractTTSEngine
 from tts_api.services.tts_service import generate_speech_from_request
@@ -91,8 +96,10 @@ async def lifespan(app: FastAPI):
                 logging.info(f"Loading '{engine_name}' engine...")
                 ENGINE_REGISTRY[engine_name].instance.load_model()
                 enabled_engine_count += 1
+            except EngineLoadError as e:
+                logging.critical(f"FATAL: Failed to load '{engine_name}' engine: {e}", exc_info=True)
             except Exception as e:
-                logging.error(f"Failed to load '{engine_name}' engine: {e}", exc_info=True)
+                logging.critical(f"An unexpected error occurred while loading '{engine_name}': {e}", exc_info=True)
         else:
             logging.warning(f"Configuration requests to enable '{engine_name}', but no such engine is registered or available.")
 
@@ -106,6 +113,40 @@ app = FastAPI(
     version="2.2.0",
     lifespan=lifespan
 )
+
+@app.exception_handler(ClientRequestError)
+async def client_request_error_handler(request: Request, exc: ClientRequestError):
+    logging.warning(f"Client request error for '{request.url.path}': {exc.message}")
+    return JSONResponse(
+        status_code=400,
+        content={"detail": exc.message},
+    )
+
+@app.exception_handler(InvalidVoiceTokenException)
+async def invalid_voice_token_handler(request: Request, exc: InvalidVoiceTokenException):
+    logging.warning(f"Invalid voice token used for '{request.url.path}': {exc.message}")
+    return JSONResponse(
+        status_code=409,  # 409 Conflict is more appropriate for an invalid state token
+        content={"detail": exc.message},
+    )
+
+@app.exception_handler(EngineExecutionError)
+async def engine_execution_error_handler(request: Request, exc: EngineExecutionError):
+    # Log with full traceback because this is a server-side failure
+    logging.error(f"Engine execution error for '{request.url.path}': {exc.message}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal error occurred during generation. Check server logs for details."},
+    )
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    # This is a final safety net for any unhandled exceptions.
+    logging.error(f"An unexpected unhandled exception occurred for '{request.url.path}': {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An unexpected internal server error occurred."},
+    )
 
 def dynamic_request_parser():
     """
@@ -202,48 +243,36 @@ async def generate_speech(
             detail=f"The '{engine_name}' engine is installed but not enabled on this server. Enabled engines: {settings.ENABLED_MODELS}"
         )
 
-    try:
-        engine_def = ENGINE_REGISTRY[engine_name]
-        engine_params = getattr(req, engine_def.param_field_name)
+    engine_def = ENGINE_REGISTRY[engine_name]
+    engine_params = getattr(req, engine_def.param_field_name)
 
-        ref_audio_data = await ref_audio.read() if ref_audio else None
+    ref_audio_data = await ref_audio.read() if ref_audio else None
 
-        synthesis_result = generate_speech_from_request(
-            req=req,
-            engine=engine_def.instance,
-            engine_params=engine_params,
-            ref_audio_data=ref_audio_data
-        )
+    synthesis_result = generate_speech_from_request(
+        req=req,
+        engine=engine_def.instance,
+        engine_params=engine_params,
+        ref_audio_data=ref_audio_data
+    )
 
-        media_type = MEDIA_TYPES.get(
-            req.post_processing.export_format,
-            "application/octet-stream"
-        )
+    media_type = MEDIA_TYPES.get(
+        req.post_processing.export_format,
+        "application/octet-stream"
+    )
 
-        # Prepare the response and add the generic metadata header if it exists
-        response = StreamingResponse(synthesis_result.audio_buffer, media_type=media_type)
-        if synthesis_result.metadata:
-            metadata_json = json.dumps(synthesis_result.metadata)
-            response.headers["X-Generation-Metadata"] = metadata_json
-            logging.info(f"Returning generation metadata in header: {metadata_json}")
+    # Prepare the response and add the generic metadata header if it exists
+    response = StreamingResponse(synthesis_result.audio_buffer, media_type=media_type)
+    if synthesis_result.metadata:
+        metadata_json = json.dumps(synthesis_result.metadata)
+        response.headers["X-Generation-Metadata"] = metadata_json
+        logging.info(f"Returning generation metadata in header: {metadata_json}")
 
-        return response
-
-    except InvalidVoiceTokenException as e:
-        logging.warning(f"Client used an invalid voice token for engine '{engine_name}': {e}")
-        # Return a 409 Conflict with the clear, actionable message from the exception.
-        raise HTTPException(status_code=409, detail=str(e))
-    except ValueError as ve:
-        logging.warning(f"Bad request for engine '{engine_name}': {ve}")
-        raise HTTPException(status_code=400, detail=str(ve))
-    except Exception as e:
-        logging.error(f"An unexpected error occurred with engine '{engine_name}': {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="An internal error occurred during generation.")
+    return response
 
 @app.get("/health", summary="Check API Health", tags=["Management"])
 async def health_check():
     return {
         "status": "ok",
-        "registered_engines": list(ENGINE_REGISTRY.keys()), # More informative health check
+        "registered_engines": list(ENGINE_REGISTRY.keys()),
         "enabled_models": settings.ENABLED_MODELS
     }
