@@ -6,7 +6,7 @@ from contextlib import contextmanager
 import torch
 import torch.nn.functional as F
 
-from fish_speech.models.text2semantic.inference import init_model as init_t2s_model, generate_long
+from fish_speech.models.text2semantic.inference import init_model as init_t2s_model, generate_long, generate_t2s_batch
 from fish_speech.models.dac.inference import load_model as load_decoder_model
 from fish_speech.inference_engine.reference_loader import ReferenceLoader
 
@@ -183,47 +183,50 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
 
         if prompt_tokens is not None:
             prompt_tokens = prompt_tokens.to(settings.DEVICE)
+            
+        # Sort text chunks by length to optimize T2S batching by minimizing padding.
+        # We store original indices to restore the order after T2S generation.
+        indexed_text_chunks = sorted(
+            enumerate(text_chunks),
+            key=lambda item: len(item[1]),
+            reverse=True
+        )
+        sorted_texts = [item[1] for item in indexed_text_chunks]
+        original_indices_map = [item[0] for item in indexed_text_chunks]
 
         # Phase 1: Generate semantic codes with T2S model (LLaMA)
         t2s_batch_size = settings.FISHSPEECH_T2S_BATCH_SIZE
-        if t2s_batch_size > 1:
-            logging.warning(
-                f"FishSpeech T2S batch size is set to {t2s_batch_size}, but the current "
-                "implementation processes texts sequentially. This setting is for future-proofing."
-            )
 
-        all_semantic_codes = []
+        sorted_semantic_codes = []
         with torch.inference_mode(), \
              model_context(self._decoder_model, self._decoder_offload_device, settings.FISHSPEECH_OFFLOAD_DECODER_MODEL), \
              model_context(self._t2s_model, settings.DEVICE, settings.FISHSPEECH_OFFLOAD_T2S_MODEL):
 
-            logging.info(f"Generating semantic codes for {len(text_chunks)} chunks with T2S model...")
-            # This outer loop respects the batch size setting, even if the inner loop is sequential.
-            for i in range(0, len(text_chunks), t2s_batch_size):
-                batch = text_chunks[i:i + t2s_batch_size]
-                # The underlying `generate_long` is sequential, so we still loop here.
-                for text in batch:
-                    generator = generate_long(
-                        model=self._t2s_model,
-                        device=settings.DEVICE,
-                        decode_one_token=self._t2s_decode_one_token,
-                        text=text,
-                        prompt_text=prompt_text,
-                        prompt_tokens=prompt_tokens,
-                        temperature=params.temperature,
-                        top_p=params.top_p,
-                        repetition_penalty=params.repetition_penalty,
-                        max_new_tokens=params.max_new_tokens,
-                    )
-                    codes_for_chunk = None
-                    for response in generator:
-                        if response.action == "sample":
-                            codes_for_chunk = response.codes.cpu()
-                        elif response.action == "next":
-                            break
-                    if codes_for_chunk is None:
-                        logging.error(f"Failed to generate semantic codes for text: '{text[:50]}...'")
-                    all_semantic_codes.append(codes_for_chunk)
+            logging.info(f"Generating semantic codes for {len(sorted_texts)} chunks with T2S model...")
+            for i in range(0, len(sorted_texts), t2s_batch_size):
+                batch_texts = sorted_texts[i:i + t2s_batch_size]
+                logging.info(f"Processing T2S batch of size {len(batch_texts)}")
+
+                # Call the batched generation function
+                codes_for_batch = generate_t2s_batch(
+                    model=self._t2s_model,
+                    device=settings.DEVICE,
+                    texts=batch_texts,
+                    prompt_text=prompt_text,
+                    prompt_tokens=prompt_tokens,
+                    temperature=params.temperature,
+                    top_p=params.top_p,
+                    repetition_penalty=params.repetition_penalty,
+                    max_new_tokens=params.max_new_tokens,
+                )
+                
+                sorted_semantic_codes.extend(codes_for_batch)
+
+        # Restore the original order of the generated codes before decoding
+        all_semantic_codes = [None] * len(text_chunks)
+        for sorted_idx, original_idx in enumerate(original_indices_map):
+            if sorted_idx < len(sorted_semantic_codes):
+                all_semantic_codes[original_idx] = sorted_semantic_codes[sorted_idx]
 
         # Phase 2: Batch-decode all valid semantic codes with Vocoder
         valid_codes_with_indices = [
@@ -233,14 +236,12 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
             logging.warning("No valid semantic codes were generated for any chunk.")
             return [None] * len(text_chunks)
         
-        # Sort by length in descending order before batching.
-        # This groups tensors of similar lengths, minimizing padding and wasted computation.
+        # Sort by length in descending order for efficient vocoder batching
         valid_codes_with_indices.sort(key=lambda item: item[1].shape[1], reverse=True)
         
         final_waveforms = [None] * len(text_chunks)
         decoder_batch_size = settings.FISHSPEECH_DECODER_BATCH_SIZE
 
-        # Ensure Decoder is on GPU and T2S is on CPU for this phase
         with torch.inference_mode(), \
              model_context(self._t2s_model, self._t2s_offload_device, settings.FISHSPEECH_OFFLOAD_T2S_MODEL), \
              model_context(self._decoder_model, settings.DEVICE, settings.FISHSPEECH_OFFLOAD_DECODER_MODEL):
@@ -252,8 +253,6 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
                 original_indices = [item[0] for item in batch_of_indexed_codes]
                 codes_to_decode = [item[1] for item in batch_of_indexed_codes]
                 
-                # Pad and batch codes for the current mini-batch.
-                # Since the batch is sorted, the first element is the longest.
                 max_len = codes_to_decode[0].shape[1]
                 
                 padded_codes = []

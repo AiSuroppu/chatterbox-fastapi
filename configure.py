@@ -16,7 +16,7 @@ ENGINE_REGISTRY = {
         "downloads": [],
     },
     "fish_speech": {
-        "repo": "https://github.com/fishaudio/fish-speech.git",
+        "repo": "https://github.com/AiSuroppu/fish-speech.git",
         "torch_version": "2.6.0",
         "torchaudio_version": "2.6.0",
         "setup_deps": ["huggingface-hub"],
