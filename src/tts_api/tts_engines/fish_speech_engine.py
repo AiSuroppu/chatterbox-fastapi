@@ -19,18 +19,16 @@ from tts_api.tts_engines.base import AbstractTTSEngine
 def model_context(model: torch.nn.Module, target_device: str, offload_enabled: bool):
     """A context manager to move a model to a target device and back."""
     original_device = next(model.parameters()).device
-    
-    if not offload_enabled or str(original_device) == target_device:
-        # If offloading is disabled or model is already on the target device, do nothing.
+    target_device_obj = torch.device(target_device)
+
+    # Do nothing if offloading is disabled or the model is already on the target device
+    if not offload_enabled or original_device == target_device_obj:
         yield
         return
 
     try:
         logging.debug(f"Moving model {type(model).__name__} to {target_device} for inference.")
-        model.to(target_device)
-        # On CUDA, an empty cache can free up memory from the other model
-        if 'cuda' in target_device:
-            torch.cuda.empty_cache()
+        model.to(target_device_obj)
         yield
     finally:
         logging.debug(f"Offloading model {type(model).__name__} back to {original_device}.")
@@ -75,6 +73,8 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
             if settings.FISHSPEECH_OFFLOAD_T2S_MODEL:
                 logging.info("Offloading T2S model to CPU.")
                 self._t2s_model.to(self._t2s_offload_device)
+                if 'cuda' in settings.DEVICE:
+                    torch.cuda.empty_cache()
 
             # 2. Load Vocoder/Decoder Model
             self._decoder_model = load_decoder_model(
@@ -86,6 +86,8 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
             if settings.FISHSPEECH_OFFLOAD_DECODER_MODEL:
                 logging.info("Offloading Decoder model to CPU.")
                 self._decoder_model.to(self._decoder_offload_device)
+                if 'cuda' in settings.DEVICE:
+                    torch.cuda.empty_cache()
             
             # 3. Initialize Voice Cache
             cache_size = settings.FISHSPEECH_VOICE_CACHE_SIZE
@@ -113,6 +115,12 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
             prompt_tokens, _ = self._decoder_model.encode(audios, audio_lengths)
             if prompt_tokens.ndim == 3:
                 prompt_tokens = prompt_tokens[0]
+
+        if settings.FISHSPEECH_OFFLOAD_DECODER_MODEL:
+            if 'cuda' in settings.DEVICE:
+                logging.debug("Clearing CUDA cache after voice embedding.")
+                torch.cuda.empty_cache()
+
         return prompt_tokens
 
     def prepare_generation(
@@ -149,8 +157,7 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
             if not params.ref_text:
                 raise ClientRequestError("Reference audio was provided, but the required 'ref_text' (transcription) is missing in the request.")
 
-            prompt_tokens = self._create_prompt_tokens_from_data(ref_audio_data)
-            
+            # If cache is enabled, check for an existing voice before creating a new one.
             if self._voice_cache is not None:
                 # The token must be a composite of audio and text to be unique
                 token_hash = hashlib.sha256()
@@ -158,13 +165,26 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
                 token_hash.update(params.ref_text.encode('utf-8'))
                 token = token_hash.hexdigest()
 
-                # Cache the tuple of (tokens, text)
-                self._voice_cache[token] = (prompt_tokens, params.ref_text)
+                if token in self._voice_cache:
+                    prompt_tokens, prompt_text = self._voice_cache[token]
+                    logging.info(f"Found matching voice in cache. Reusing token: {token}")
+                else:
+                    logging.info(f"Creating and caching new voice with token: {token}")
+                    prompt_tokens = self._create_prompt_tokens_from_data(ref_audio_data)
+                    prompt_text = params.ref_text
+                    # Cache the tuple of (tokens, text)
+                    self._voice_cache[token] = (prompt_tokens, prompt_text)
+                
                 response_metadata["voice_cache_token"] = token
-                logging.info(f"Created and cached new voice with token: {token}")
-
-            generation_kwargs["prompt_tokens"] = prompt_tokens
-            generation_kwargs["prompt_text"] = params.ref_text
+                generation_kwargs["prompt_tokens"] = prompt_tokens
+                generation_kwargs["prompt_text"] = prompt_text
+            else:
+                # Caching is disabled: create a one-time voice prompt
+                logging.info("Voice cache disabled. Creating temporary voice prompt tokens.")
+                prompt_tokens = self._create_prompt_tokens_from_data(ref_audio_data)
+                generation_kwargs["prompt_tokens"] = prompt_tokens
+                generation_kwargs["prompt_text"] = params.ref_text
+            
             return generation_kwargs, response_metadata
 
         # Case 3: Neither provided. FishSpeech can run without a reference (zero-shot).
@@ -183,50 +203,31 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
 
             if prompt_tokens is not None:
                 prompt_tokens = prompt_tokens.to(settings.DEVICE)
-                
-            # Sort text chunks by length to optimize T2S batching by minimizing padding.
-            # We store original indices to restore the order after T2S generation.
-            indexed_text_chunks = sorted(
-                enumerate(text_chunks),
-                key=lambda item: len(item[1]),
-                reverse=True
-            )
-            sorted_texts = [item[1] for item in indexed_text_chunks]
-            original_indices_map = [item[0] for item in indexed_text_chunks]
 
             # Phase 1: Generate semantic codes with T2S model (LLaMA)
-            t2s_batch_size = settings.FISHSPEECH_T2S_BATCH_SIZE
-
-            sorted_semantic_codes = []
             with torch.inference_mode(), \
                 model_context(self._decoder_model, self._decoder_offload_device, settings.FISHSPEECH_OFFLOAD_DECODER_MODEL), \
                 model_context(self._t2s_model, settings.DEVICE, settings.FISHSPEECH_OFFLOAD_T2S_MODEL):
 
-                logging.info(f"Generating semantic codes for {len(sorted_texts)} chunks with T2S model...")
-                for i in range(0, len(sorted_texts), t2s_batch_size):
-                    batch_texts = sorted_texts[i:i + t2s_batch_size]
-                    logging.info(f"Processing T2S batch of size {len(batch_texts)}")
+                logging.info(f"Generating semantic codes for {len(text_chunks)} chunks with T2S model...")
+                # Call the batched generation function
+                all_semantic_codes = generate_t2s_batch(
+                    model=self._t2s_model,
+                    device=settings.DEVICE,
+                    batch_size=settings.FISHSPEECH_T2S_BATCH_SIZE,
+                    texts=text_chunks,
+                    prompt_text=prompt_text,
+                    prompt_tokens=prompt_tokens,
+                    temperature=params.temperature,
+                    top_p=params.top_p,
+                    repetition_penalty=params.repetition_penalty,
+                    max_new_tokens=params.max_new_tokens,
+                )
 
-                    # Call the batched generation function
-                    codes_for_batch = generate_t2s_batch(
-                        model=self._t2s_model,
-                        device=settings.DEVICE,
-                        texts=batch_texts,
-                        prompt_text=prompt_text,
-                        prompt_tokens=prompt_tokens,
-                        temperature=params.temperature,
-                        top_p=params.top_p,
-                        repetition_penalty=params.repetition_penalty,
-                        max_new_tokens=params.max_new_tokens,
-                    )
-                    
-                    sorted_semantic_codes.extend(codes_for_batch)
-
-            # Restore the original order of the generated codes before decoding
-            all_semantic_codes = [None] * len(text_chunks)
-            for sorted_idx, original_idx in enumerate(original_indices_map):
-                if sorted_idx < len(sorted_semantic_codes):
-                    all_semantic_codes[original_idx] = sorted_semantic_codes[sorted_idx]
+            if settings.FISHSPEECH_OFFLOAD_T2S_MODEL or settings.FISHSPEECH_OFFLOAD_DECODER_MODEL:
+                if 'cuda' in settings.DEVICE:
+                    logging.debug("Clearing CUDA cache after T2S and before Decoder.")
+                    torch.cuda.empty_cache()
 
             # Phase 2: Batch-decode all valid semantic codes with Vocoder
             valid_codes_with_indices = [
