@@ -115,6 +115,8 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
             prompt_tokens, _ = self._decoder_model.encode(audios, audio_lengths)
             if prompt_tokens.ndim == 3:
                 prompt_tokens = prompt_tokens[0]
+            # Always return the tensor on the CPU to prevent VRAM leaks in the cache
+            prompt_tokens = prompt_tokens.cpu()
 
         if settings.FISHSPEECH_OFFLOAD_DECODER_MODEL:
             if 'cuda' in settings.DEVICE:
@@ -201,9 +203,6 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
             prompt_tokens = kwargs.get("prompt_tokens")
             prompt_text = kwargs.get("prompt_text")
 
-            if prompt_tokens is not None:
-                prompt_tokens = prompt_tokens.to(settings.DEVICE)
-
             # Phase 1: Generate semantic codes with T2S model (LLaMA)
             with torch.inference_mode(), \
                 model_context(self._decoder_model, self._decoder_offload_device, settings.FISHSPEECH_OFFLOAD_DECODER_MODEL), \
@@ -223,6 +222,8 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
                     repetition_penalty=params.repetition_penalty,
                     max_new_tokens=params.max_new_tokens,
                 )
+                # Move semantic codes to CPU immediately after generation
+                all_semantic_codes = [code.cpu() if code is not None else None for code in all_semantic_codes]
 
             if settings.FISHSPEECH_OFFLOAD_T2S_MODEL or settings.FISHSPEECH_OFFLOAD_DECODER_MODEL:
                 if 'cuda' in settings.DEVICE:
