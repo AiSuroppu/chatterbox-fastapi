@@ -361,6 +361,10 @@ uvicorn main:app --host 127.0.0.1 --port 8000
 
 You can now access the interactive API documentation at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
+## Configuration (`.env` file)
+
+The `configure.py` script creates a `.env` file in the project root. You can edit this file to change server-wide settings.
+
 ## How It Works: The Generation Pipeline
 
 Understanding the request lifecycle helps in using the API parameters effectively:
@@ -477,10 +481,6 @@ else:
     print(f"Error: {response.status_code}")
     print(response.json())
 ```
-
-## Configuration (`.env` file)
-
-The `configure.py` script creates a `.env` file in the project root. You can edit this file to change server-wide settings.
 
 ## Extending the API (For Developers)
 
