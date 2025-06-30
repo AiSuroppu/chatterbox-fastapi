@@ -165,6 +165,11 @@ This example shows all available parameters with detailed comments. You can sele
     // Threshold for identifying a low-complexity word. A lower value means
     // a word needs to be more repetitive to be classified as low-complexity.
 
+    "low_complexity_chars_per_syllable": 4.0,
+    // When a word is identified as low-complexity (e.g., 'Ahhhhh'), its 
+    // syllable count for the max duration budget is estimated as 
+    // (word_length / this_value).
+
     "low_complexity_max_duration_per_syllable": 0.600,
     // Relaxed maximum duration per syllable for low-complexity words.
 

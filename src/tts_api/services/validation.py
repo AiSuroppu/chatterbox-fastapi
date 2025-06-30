@@ -189,9 +189,16 @@ class VoicedDurationValidator(AbstractValidator):
             is_low_complexity = (lnv is not None and lnv < params.low_complexity_log_variety_threshold)
 
             if is_low_complexity:
-                # Use the relaxed rate for stretched words/onomatopoeia.
-                max_duration_budget += syllables * params.low_complexity_max_duration_per_syllable
-                logging.debug(f"Word '{cleaned_word}' (LNV: {lnv:.2f}) budgeted with relaxed rate.")
+                # This word is likely onomatopoeia. Use a length-based heuristic
+                # instead of the (likely incorrect) pyphen syllable count.
+                effective_syllables = max(1, math.ceil(len(cleaned_word) / params.low_complexity_chars_per_syllable))
+                
+                # Use the relaxed rate with our new scalable syllable estimate.
+                max_duration_budget += effective_syllables * params.low_complexity_max_duration_per_syllable
+                logging.debug(
+                    f"Word '{cleaned_word}' (LNV: {lnv:.2f}) budgeted as low-complexity "
+                    f"with {effective_syllables} effective syllables."
+                )
             else:
                 # Use the standard, stricter rate for normal words.
                 max_duration_budget += syllables * params.max_voiced_duration_per_syllable
