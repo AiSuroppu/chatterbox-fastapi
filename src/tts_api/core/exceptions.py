@@ -12,6 +12,21 @@ class ClientRequestError(TTSAPIException):
     """
     pass
 
+class NoValidCandidatesError(ClientRequestError):
+    """
+    Raised when, after all retries, no valid audio could be generated for a
+    specific text segment because all candidates failed validation.
+    This is considered a client-side error, as it's often caused by the input text
+    or overly strict validation settings. Should result in a 4xx response.
+    """
+    def __init__(self, segment_index: int, segment_text: str, last_error: str):
+        message = (
+            f"Failed to generate a valid output for segment {segment_index + 1} "
+            f"after all retries. Text: '{segment_text[:100]}...'. "
+            f"Last validation failure: '{last_error}'"
+        )
+        super().__init__(message)
+
 class EngineExecutionError(TTSAPIException):
     """
     Raised when a TTS engine fails during the actual generation/processing

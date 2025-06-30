@@ -9,7 +9,7 @@ from collections import defaultdict
 from enum import Enum, auto
 
 from tts_api.core.models import BaseTTSRequest, PostProcessingOptions
-from tts_api.core.exceptions import ClientRequestError, EngineExecutionError
+from tts_api.core.exceptions import ClientRequestError, EngineExecutionError, NoValidCandidatesError
 from tts_api.tts_engines.base import AbstractTTSEngine
 from tts_api.services.text_processing import process_and_chunk_text, TextChunk, BoundaryType
 from tts_api.services.audio_processor import post_process_audio, get_speech_timestamps, calculate_speech_ratio_from_timestamps
@@ -54,6 +54,7 @@ class GenerationJob:
     
     # Results
     result: Optional[GeneratedSegment] = None
+    last_failure_reason: Optional[str] = None
 
 @dataclass
 class SynthesisResult:
@@ -292,8 +293,11 @@ def generate_speech_from_request(
                         vad_speech_timestamps=vad_timestamps,
                         score=score
                     )
-                elif job.attempt_count <= req.max_retries:
-                    logging.warning(f"Validation failed for chunk (seg={job.segment_idx}, cand={job.candidate_idx}, att={job.attempt_count}, seed={job.current_seed}): {final_result.reason}. Will retry.")
+                    job.last_failure_reason = None # Clear reason on success
+                else:
+                    job.last_failure_reason = final_result.reason # Store failure reason
+                    if job.attempt_count <= req.max_retries:
+                        logging.warning(f"Validation failed for chunk (seg={job.segment_idx}, cand={job.candidate_idx}, att={job.attempt_count}, seed={job.current_seed}): {final_result.reason}. Will retry.")
 
     # Phase 3: Finalization & Assembly
     final_failures = 0
@@ -310,7 +314,19 @@ def generate_speech_from_request(
     for i, segment_info in enumerate(input_segments):
         candidates_for_segment = [job for job in successful_jobs if job.segment_idx == i]
         if not candidates_for_segment:
-            raise EngineExecutionError(f"TTS failed to produce any valid candidates for segment {i+1}: '{segment_info.text[:50]}...'. This may be due to an issue with the model or invalid input text for the model.")
+            # Find a failed job for this segment to extract the last error message
+            failed_jobs_for_segment = [
+                job for job in all_jobs if job.segment_idx == i and job.status == JobStatus.FAILED_FINAL
+            ]
+            last_error = "Validation failed, but no specific reason was captured."
+            if failed_jobs_for_segment and failed_jobs_for_segment[0].last_failure_reason:
+                last_error = failed_jobs_for_segment[0].last_failure_reason
+            
+            raise NoValidCandidatesError(
+                segment_index=i,
+                segment_text=segment_info.text,
+                last_error=last_error
+            )
         
         best_job = max(candidates_for_segment, key=lambda j: j.result.score)
         final_segments.append(best_job.result)
