@@ -127,7 +127,7 @@ class BaseTTSRequest(BaseModel):
     text: str = Field(..., description="The text to be converted to speech.", min_length=1)
     seed: Union[int, List[int]] = Field(0, description="Random seed or a list of seeds. If a list is provided, seeds are used sequentially for each generation candidate. A seed of 0 means use a random seed.")
     best_of: int = Field(1, ge=1, le=10, description="Generate multiple speech outputs and automatically return the one with the highest speech-to-audio-duration ratio. Higher values take longer but can improve quality.")
-    max_retries: int = Field(1, ge=0, le=10, description="Number of times to retry a failed or low-quality generation for a single text chunk.")
+    max_retries: int = Field(1, ge=0, le=20, description="Number of times to retry a failed or low-quality generation for a single text chunk.")
     validation: ValidationOptions = ValidationOptions()
     text_processing: TextProcessingOptions = TextProcessingOptions()
     post_processing: PostProcessingOptions = PostProcessingOptions()
