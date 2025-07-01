@@ -73,7 +73,7 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
             if settings.FISHSPEECH_OFFLOAD_T2S_MODEL:
                 logging.info("Offloading T2S model to CPU.")
                 self._t2s_model.to(self._t2s_offload_device)
-                if 'cuda' in settings.DEVICE:
+                if 'cuda' in settings.DEVICE.lower():
                     torch.cuda.empty_cache()
 
             # 2. Load Vocoder/Decoder Model
@@ -86,7 +86,7 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
             if settings.FISHSPEECH_OFFLOAD_DECODER_MODEL:
                 logging.info("Offloading Decoder model to CPU.")
                 self._decoder_model.to(self._decoder_offload_device)
-                if 'cuda' in settings.DEVICE:
+                if 'cuda' in settings.DEVICE.lower():
                     torch.cuda.empty_cache()
             
             # 3. Initialize Voice Cache
@@ -119,7 +119,7 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
             prompt_tokens = prompt_tokens.cpu()
 
         if settings.FISHSPEECH_OFFLOAD_DECODER_MODEL:
-            if 'cuda' in settings.DEVICE:
+            if 'cuda' in settings.DEVICE.lower():
                 logging.debug("Clearing CUDA cache after voice embedding.")
                 torch.cuda.empty_cache()
 
@@ -209,24 +209,40 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
                 model_context(self._t2s_model, settings.DEVICE, settings.FISHSPEECH_OFFLOAD_T2S_MODEL):
 
                 logging.info(f"Generating semantic codes for {len(text_chunks)} chunks with T2S model...")
-                # Call the batched generation function
-                all_semantic_codes = generate_t2s_batch(
-                    model=self._t2s_model,
-                    device=settings.DEVICE,
-                    batch_size=settings.FISHSPEECH_T2S_BATCH_SIZE,
-                    texts=text_chunks,
-                    prompt_text=prompt_text,
-                    prompt_tokens=prompt_tokens,
-                    temperature=params.temperature,
-                    top_p=params.top_p,
-                    repetition_penalty=params.repetition_penalty,
-                    max_new_tokens=params.max_new_tokens,
-                )
+                
+                current_t2s_batch_size = settings.FISHSPEECH_T2S_BATCH_SIZE
+                while True:
+                    try:
+                        all_semantic_codes = generate_t2s_batch(
+                            model=self._t2s_model,
+                            device=settings.DEVICE,
+                            batch_size=current_t2s_batch_size,
+                            texts=text_chunks,
+                            prompt_text=prompt_text,
+                            prompt_tokens=prompt_tokens,
+                            temperature=params.temperature,
+                            top_p=params.top_p,
+                            repetition_penalty=params.repetition_penalty,
+                            max_new_tokens=params.max_new_tokens,
+                        )
+                        break # Success
+                    except torch.cuda.OutOfMemoryError as e:
+                        if 'cuda' not in settings.DEVICE.lower():
+                            raise
+                        
+                        torch.cuda.empty_cache()
+                        if current_t2s_batch_size > 1:
+                            new_batch_size = current_t2s_batch_size // 2
+                            logging.warning(f"T2S model CUDA OOM with batch size {current_t2s_batch_size}. Retrying with {new_batch_size}.")
+                            current_t2s_batch_size = new_batch_size
+                        else:
+                            raise RuntimeError("T2S model ran out of memory even with batch size 1.") from e
+                
                 # Move semantic codes to CPU immediately after generation
                 all_semantic_codes = [code.cpu() if code is not None else None for code in all_semantic_codes]
 
             if settings.FISHSPEECH_OFFLOAD_T2S_MODEL or settings.FISHSPEECH_OFFLOAD_DECODER_MODEL:
-                if 'cuda' in settings.DEVICE:
+                if 'cuda' in settings.DEVICE.lower():
                     logging.debug("Clearing CUDA cache after T2S and before Decoder.")
                     torch.cuda.empty_cache()
 
@@ -242,16 +258,22 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
             valid_codes_with_indices.sort(key=lambda item: item[1].shape[1], reverse=True)
             
             final_waveforms = [None] * len(text_chunks)
-            decoder_batch_size = settings.FISHSPEECH_DECODER_BATCH_SIZE
+            current_decoder_batch_size = settings.FISHSPEECH_DECODER_BATCH_SIZE
 
             with torch.inference_mode(), \
                 model_context(self._t2s_model, self._t2s_offload_device, settings.FISHSPEECH_OFFLOAD_T2S_MODEL), \
                 model_context(self._decoder_model, settings.DEVICE, settings.FISHSPEECH_OFFLOAD_DECODER_MODEL):
 
-                logging.info(f"Decoding {len(valid_codes_with_indices)} semantic code sequences in batches of up to {decoder_batch_size}.")
+                logging.info(f"Decoding {len(valid_codes_with_indices)} semantic code sequences in batches of up to {current_decoder_batch_size}.")
                 
-                for i in range(0, len(valid_codes_with_indices), decoder_batch_size):
-                    batch_of_indexed_codes = valid_codes_with_indices[i:i + decoder_batch_size]
+                i = 0
+                while i < len(valid_codes_with_indices):
+                    batch_end = i + current_decoder_batch_size
+                    batch_of_indexed_codes = valid_codes_with_indices[i:batch_end]
+                    
+                    if not batch_of_indexed_codes:
+                        break
+
                     original_indices = [item[0] for item in batch_of_indexed_codes]
                     codes_to_decode = [item[1] for item in batch_of_indexed_codes]
                     
@@ -265,13 +287,30 @@ class FishSpeechEngine(AbstractTTSEngine, ReferenceLoader):
                     
                     batched_codes = torch.stack(padded_codes, dim=0).to(settings.DEVICE)
                     code_lengths = torch.tensor([c.shape[1] for c in codes_to_decode], device=settings.DEVICE)
+                    
+                    try:
+                        decoded_waveforms_batch, _ = self._decoder_model.decode(batched_codes, feature_lengths=code_lengths)
+                        decoded_waveforms_batch = decoded_waveforms_batch.cpu()
 
-                    decoded_waveforms_batch, _ = self._decoder_model.decode(batched_codes, feature_lengths=code_lengths)
-                    decoded_waveforms_batch = decoded_waveforms_batch.cpu()
+                        # Place the decoded waveforms back into the correct positions in the final list
+                        for original_idx, waveform in zip(original_indices, decoded_waveforms_batch):
+                            final_waveforms[original_idx] = waveform
+                        
+                        i += len(batch_of_indexed_codes) # Move to the next chunk
+                    except torch.cuda.OutOfMemoryError as e:
+                        if 'cuda' not in settings.DEVICE.lower():
+                            raise
 
-                    # Place the decoded waveforms back into the correct positions in the final list
-                    for original_idx, waveform in zip(original_indices, decoded_waveforms_batch):
-                        final_waveforms[original_idx] = waveform
+                        torch.cuda.empty_cache()
+                        if current_decoder_batch_size > 1:
+                            new_batch_size = current_decoder_batch_size // 2
+                            logging.warning(
+                                f"Decoder model CUDA OOM with batch size {current_decoder_batch_size}. "
+                                f"Retrying this batch with size {new_batch_size}."
+                            )
+                            current_decoder_batch_size = new_batch_size
+                        else:
+                             raise RuntimeError("Decoder model ran out of memory even with batch size 1.") from e
 
             return final_waveforms
         except Exception as e:

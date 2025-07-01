@@ -135,19 +135,39 @@ class ChatterboxEngine(AbstractTTSEngine):
                 original_watermark_method = self._model.watermarker.apply_watermark
                 self._model.watermarker.apply_watermark = _noop_watermark
             
-            logging.debug(f"  Engine processing {len(text_chunks)} text chunks with a batch of size {settings.CHATTERBOX_MAX_BATCH_SIZE}")
-            all_waveforms = self._model.generate(
-                text=text_chunks,
-                audio_prompt_path=None, # Explicitly set to None
-                exaggeration=params.exaggeration,
-                cfg_weight=params.cfg_weight,
-                temperature=params.temperature,
-                use_analyzer=params.use_analyzer,
-                voice_embedding_cache=voice_embedding_cache,
-                offload_s3gen=settings.CHATTERBOX_OFFLOAD_S3GEN,
-                offload_t3=settings.CHATTERBOX_OFFLOAD_T3,
-                batch_size=settings.CHATTERBOX_MAX_BATCH_SIZE
-            )
+            current_batch_size = settings.CHATTERBOX_MAX_BATCH_SIZE
+            while True:
+                try:
+                    logging.debug(f"  Engine processing {len(text_chunks)} text chunks with a batch of size {current_batch_size}")
+                    all_waveforms = self._model.generate(
+                        text=text_chunks,
+                        audio_prompt_path=None, # Explicitly set to None
+                        exaggeration=params.exaggeration,
+                        cfg_weight=params.cfg_weight,
+                        temperature=params.temperature,
+                        use_analyzer=params.use_analyzer,
+                        voice_embedding_cache=voice_embedding_cache,
+                        offload_s3gen=settings.CHATTERBOX_OFFLOAD_S3GEN,
+                        offload_t3=settings.CHATTERBOX_OFFLOAD_T3,
+                        batch_size=current_batch_size
+                    )
+                    break # Success
+                except torch.cuda.OutOfMemoryError as e:
+                    if 'cuda' not in settings.DEVICE.lower():
+                        raise  # Not a CUDA device, so this is unexpected. Re-raise.
+
+                    torch.cuda.empty_cache()
+                    if current_batch_size > 1:
+                        new_batch_size = current_batch_size // 2
+                        logging.warning(
+                            f"CUDA OOM detected with batch size {current_batch_size}. "
+                            f"Retrying with batch size {new_batch_size}."
+                        )
+                        current_batch_size = new_batch_size
+                    else:
+                        logging.error(f"CUDA OOM even with batch size 1. Cannot proceed. Error: {e}")
+                        raise RuntimeError("CUDA out of memory even with batch size 1.") from e
+            
             if not isinstance(all_waveforms, list):
                 all_waveforms = [all_waveforms]  # Ensure we always have a list
             
