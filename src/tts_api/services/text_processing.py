@@ -4,6 +4,7 @@ from typing import List, Sequence
 from functools import lru_cache
 from enum import Enum, auto
 from dataclasses import dataclass
+import unicodedata
 
 import pysbd
 from nemo_text_processing.text_normalization.normalize import Normalizer
@@ -54,38 +55,62 @@ def get_normalizer(language: str) -> Normalizer:
 def _normalize_whitespace_and_unicode(text: str) -> str:
     """
     Performs foundational, non-destructive text cleaning.
-    - Normalizes various unicode and control characters.
-    - Collapses multiple whitespace characters into a single space.
+
+    Stage 1: Manually replace a curated list of characters that NFKC normalization
+             is confirmed *not* to handle, or for which a specific TTS-friendly
+             policy is desired (e.g., converting Japanese quotes to standard quotes).
+             This stage also implements the policy of removing decorative symbols.
+
+    Stage 2: Use NFKC normalization to handle a wide range of other Unicode
+             compatibility characters automatically, including various space types,
+             ligatures, full-width characters, and mathematical symbols.
     """
-    normalization_rules = [
-        # --- Quotes and Dashes ---
-        #('’', "'"), # Smart single quote
-        #('‘', "'"), # Smart single quote
-        #('”', '"'), # Smart double quote
-        #('“', '"'), # Smart double quote
-        #('–', '-'), # En dash
-        #('—', '-'), # Em dash
-        #('−', '-'), # Minus sign
+    # Stage 1: Explicit manual mapping for common punctuation.
+    manual_replacement_map = {
+        # --- Quotes ---
+        #'’': "'",  # Smart Single Quote (right)
+        #'‘': "'",  # Smart Single Quote (left)
+        #'”': '"',  # Smart Double Quote (right)
+        #'“': '"',  # Smart Double Quote (left)
+
+        # --- Dashes ---
+        #'–': '-',  # En Dash
+        #'—': '-',  # Em Dash
+        #'−': '-',  # Minus Sign
+
+        # --- Control/Invisible Characters (Policy: Remove) ---
+        '\u200b': '', # Zero-width Space
+        '\u00ad': '', # Soft Hyphen
+        '\ufeff': '', # Byte Order Mark (BOM)
         
-        # --- Ellipsis ---
-        #('…', '...'), # Unicode ellipsis
-
-        # --- Invisible/Control Characters (remove them) ---
-        ('\u200b', ''), # Zero-width space
-        ('\u00ad', ''), # Soft hyphen
-        ('\ufeff', ''), # Byte Order Mark (BOM)
-
-        # --- Whitespace Variants (normalize to standard space) ---
-        ('\u00a0', ' '), # Non-breaking space
-        ('\u2009', ' '), # Thin space
-        ('\u200a', ' '), # Hair space
-        ('\u2002', ' '), # En space
-        ('\u2003', ' '), # Em space
-    ]
-    for find, replace in normalization_rules:
+        # --- Language-Specific Brackets (Policy: Convert to smart double quotes) ---
+        '「': '“', '」': '”',  # Japanese corner brackets to quotes
+        '『': '“', '』': '”',  # Japanese lenticular brackets to quotes
+        
+        # --- Decorative Symbols (Policy: Remove) ---
+        # Arrows
+        '←': '', '→': '', '↑': '', '↓': '', '↔': '', '↕': '', '↖': '',
+        '↗': '', '↘': '', '↙': '', '⟵': '', '⟶': '', '⟷': '',
+        # Geometric Shapes
+        '■': '', '□': '', '▲': '', '△': '', '▼': '', '▽': '', '◆': '',
+        '◇': '', '●': '', '○': '', '▪': '', '▫': '', '•': '', '‣': '',
+        # Dingbats & Stars
+        '★': '', '☆': '', '✪': '', '✩': '', '✭': '', '✮': '',
+        # Checks & Crosses
+        '✓': '', '✔': '', '✗': '', '✘': '', '✅': '', '❌': '',
+        # Hearts & Suits
+        '♥': '', '♡': '', '♦': '', '♢': '', '♠': '', '♤': '', '♣': '', '♧': '',
+        # Music Notes
+        '♩': '', '♪': '', '♫': '', '♬': '', '♭': '', '♮': '', '♯': '',
+    }
+    for find, replace in manual_replacement_map.items():
         text = text.replace(find, replace)
+
+    # Stage 2: General Unicode normalization for everything else.
+    text = unicodedata.normalize('NFKC', text)
     
-    # IMPORTANT: Preserve newlines for the segmenter.
+    # Final step: Collapse horizontal whitespace (spaces, tabs) that may have
+    # been introduced or left over, while preserving newlines for paragraph splitting.
     text = re.sub(r'[ \t]+', ' ', text)
 
     return text.strip()
@@ -108,7 +133,7 @@ def _normalize_sentence_spacing_and_ending(sentence: str) -> str:
 
     # Add a period if the sentence doesn't end with punctuation.
     # Define sentence-ending punctuation and characters to ignore when checking.
-    ending_punctuation = ".?!…"
+    ending_punctuation = ".?!"
     # Characters to strip from the end before checking (e.g., quotes).
     chars_to_strip_before_check = ' "\'’”' 
     
@@ -179,7 +204,7 @@ def _prepare_and_segment_sentences(text: str, options: TextProcessingOptions) ->
 def _force_split_long_chunk(
     chunk: str,
     max_length: int,
-    split_delimiters: Sequence[str] = (".", "?", "!", "…", "—", "–", ";", ":", ",", " ")
+    split_delimiters: Sequence[str] = (".", "?", "!", "—", "–", ";", ":", ",", " ")
 ) -> List[str]:
     """
     Splits a text chunk into smaller parts, ensuring no part exceeds max_length.
