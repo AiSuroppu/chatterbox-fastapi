@@ -78,21 +78,49 @@ This example shows all available parameters with detailed comments. You can sele
 
     "to_lowercase": false,
     // If true, converts all input text to lowercase before processing.
+    // Generally not recommended as it loses semantic information.
 
     "remove_bracketed_text": false,
     // If true, removes text inside brackets [] and parentheses ().
-    // Useful for stripping annotations.
+    // Useful for stripping author annotations or stage directions.
 
     "use_nemo_normalizer": false,
     // If true, uses the NeMo text normalizer to convert numbers, dates,
     // currencies, etc., into their full word forms (e.g., '$10.50' becomes
-    // 'ten dollars and fifty cents'). Requires the 'en' language.
+    // 'ten dollars and fifty cents').
 
-    "apply_advanced_cleaning": false,
-    // If true, applies advanced, heuristic cleaning rules. This includes
-    // removing stutters (e.g., 'b-but'), normalizing emphasis markers
-    // (e.g., '*word*'), and other common text artifacts.
+    // --- Structural & Stylistic Normalization ---
+    // These options clean up common text artifacts and stylistic patterns
+    // to create a cleaner, more predictable input for the TTS model.
 
+    "normalize_scene_breaks": true,
+    // If true, collapses lines containing only symbols (e.g., '***', '---')
+    // into proper paragraph breaks for better pacing.
+
+    "min_scene_break_length": 3,
+    // A line must have this many symbols to be a scene break. Prevents
+    // misinterpreting single '*' or '-' characters. (Min: 2)
+
+    "normalize_repeated_punctuation": true,
+    // If true, normalizes sequences of punctuation (e.g., '?!?!' -> '?!',
+    // '---' -> '—', '....' -> '...').
+
+    "normalize_emphasis": true,
+    // If true, removes emphasis markers like '*' and '_' from around
+    // words (e.g., '*word*' becomes 'word').
+
+    "normalize_stuttering": true,
+    // If true, collapses stuttering patterns like 'w-w-what' into 'what'.
+
+    "max_repeated_alpha_chars": 4,
+    // Truncates sequences of a repeated letter to this length (e.g.,
+    // 'Ahhhhh' -> 'Ahhhh'). Set to null to disable. (Min: 1)
+
+    "max_repeated_symbol_chars": 1,
+    // Truncates sequences of any other repeated symbol (e.g., '$$$') to
+    // this length. A fallback that runs after other rules. Null to disable.
+
+    // --- Chunking Strategy ---
     "chunking_strategy": "paragraph",
     // Method to split input text into smaller chunks for the TTS engine.
     // 'paragraph': Keeps paragraphs whole. Long paragraphs are split using
@@ -166,8 +194,8 @@ This example shows all available parameters with detailed comments. You can sele
     // a word needs to be more repetitive to be classified as low-complexity.
 
     "low_complexity_chars_per_syllable": 4.0,
-    // When a word is identified as low-complexity (e.g., 'Ahhhhh'), its 
-    // syllable count for the max duration budget is estimated as 
+    // When a word is identified as low-complexity (e.g., 'Ahhhhh'), its
+    // syllable count for the max duration budget is estimated as
     // (word_length / this_value).
 
     "low_complexity_max_duration_per_syllable": 0.600,

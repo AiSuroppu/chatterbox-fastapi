@@ -6,11 +6,20 @@ from enum import Enum, auto
 from dataclasses import dataclass
 import unicodedata
 
+import regex
 import pysbd
 from nemo_text_processing.text_normalization.normalize import Normalizer
 
 from tts_api.core.config import settings
 from tts_api.core.models import TextChunkingStrategy, TextProcessingOptions
+
+PARAGRAPH_BREAK_TOKEN = "__PARAGRAPH_BREAK__"
+
+# For _clean_unicode_characters
+_UNICODE_WHITELIST_PATTERN = regex.compile(r'[^\p{L}\p{N}\p{P}\p{S}\s]+')
+_UNICODE_BLACKLIST_PATTERN = regex.compile(
+    r'[\p{Emoji_Presentation}\p{InBox_Drawing}\p{InBlock_Elements}\p{InGeometric_Shapes}\p{InMiscellaneous_Symbols}\p{InMiscellaneous_Symbols_and_Pictographs}]+'
+)
 
 class BoundaryType(Enum):
     """Describes the type of boundary that follows a text chunk."""
@@ -52,20 +61,18 @@ def get_normalizer(language: str) -> Normalizer:
         overwrite_cache=False
     )
 
-def _normalize_whitespace_and_unicode(text: str) -> str:
+def _normalize_unicode(text: str) -> str:
     """
-    Performs foundational, non-destructive text cleaning.
+    Performs Unicode character normalization.
 
     Stage 1: Manually replace a curated list of characters that NFKC normalization
              is confirmed *not* to handle, or for which a specific TTS-friendly
              policy is desired (e.g., converting Japanese quotes to standard quotes).
-             This stage also implements the policy of removing decorative symbols.
-
     Stage 2: Use NFKC normalization to handle a wide range of other Unicode
              compatibility characters automatically, including various space types,
              ligatures, full-width characters, and mathematical symbols.
     """
-    # Stage 1: Explicit manual mapping for common punctuation.
+    # Stage 1: Explicit manual mapping for policy-driven changes.
     manual_replacement_map = {
         # --- Quotes ---
         #'’': "'",  # Smart Single Quote (right)
@@ -78,42 +85,139 @@ def _normalize_whitespace_and_unicode(text: str) -> str:
         #'—': '-',  # Em Dash
         #'−': '-',  # Minus Sign
 
-        # --- Control/Invisible Characters (Policy: Remove) ---
-        '\u200b': '', # Zero-width Space
-        '\u00ad': '', # Soft Hyphen
-        '\ufeff': '', # Byte Order Mark (BOM)
-        
         # --- Language-Specific Brackets (Policy: Convert to smart double quotes) ---
-        '「': '“', '」': '”',  # Japanese corner brackets to quotes
-        '『': '“', '』': '”',  # Japanese lenticular brackets to quotes
-        
-        # --- Decorative Symbols (Policy: Remove) ---
-        # Arrows
-        '←': '', '→': '', '↑': '', '↓': '', '↔': '', '↕': '', '↖': '',
-        '↗': '', '↘': '', '↙': '', '⟵': '', '⟶': '', '⟷': '',
-        # Geometric Shapes
-        '■': '', '□': '', '▲': '', '△': '', '▼': '', '▽': '', '◆': '',
-        '◇': '', '●': '', '○': '', '▪': '', '▫': '', '•': '', '‣': '',
-        # Dingbats & Stars
-        '★': '', '☆': '', '✪': '', '✩': '', '✭': '', '✮': '',
-        # Checks & Crosses
-        '✓': '', '✔': '', '✗': '', '✘': '', '✅': '', '❌': '',
-        # Hearts & Suits
-        '♥': '', '♡': '', '♦': '', '♢': '', '♠': '', '♤': '', '♣': '', '♧': '',
-        # Music Notes
-        '♩': '', '♪': '', '♫': '', '♬': '', '♭': '', '♮': '', '♯': '',
+        '「': '“', '」': '”',  # Corner brackets to quotes
+        '『': '“', '』': '”',  # Lenticular brackets to quotes
     }
     for find, replace in manual_replacement_map.items():
         text = text.replace(find, replace)
 
-    # Stage 2: General Unicode normalization for everything else.
+    # Stage 2: General Unicode normalization.
     text = unicodedata.normalize('NFKC', text)
+    return text
+
+def _clean_unicode_characters(text: str) -> str:
+    """
+    Removes non-verbalizable characters using a two-step approach.
+
+    1.  Whitelist Pass: Keeps only characters from essential Unicode categories
+        (\p{L}, \p{N}, \p{P}, \p{S}, \s), removing everything else (like control
+        characters \p{C} and combining marks \p{M}).
+
+    2.  Blacklist Pass: Removes specific categories of symbols that were
+        allowed by the whitelist but are generally non-verbalizable. This
+        includes Emojis, box-drawing characters, and various pictographs.
+    """
+    # Step 1: Whitelist. Remove anything NOT in the allowed categories.
+    # This is a broad filter that cleans up control characters, format characters,
+    # private-use characters, and unassigned code points.
+    text = _UNICODE_WHITELIST_PATTERN.sub(' ', text)
+
+    # Step 2: Blacklist. Remove specific unwanted categories that the
+    # whitelist allowed through (because they are in \p{S}).
+    text = _UNICODE_BLACKLIST_PATTERN.sub(' ', text)
     
-    # Final step: Collapse horizontal whitespace (spaces, tabs) that may have
-    # been introduced or left over, while preserving newlines for paragraph splitting.
+    return text
+
+def _normalize_whitespace(text: str) -> str:
+    """
+    Normalizes all whitespace in the text.
+
+    - Normalizes all line endings to a single newline ('\n').
+    - Collapses sequences of horizontal whitespace (spaces, tabs) into one space.
+    - Collapses multiple newlines, preserving paragraph breaks (double newlines).
+    - Removes leading/trailing whitespace from the text.
+    """
+    # 3a: Normalize all line endings to LF ('\n').
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    
+    # 3b: Collapse horizontal whitespace into a single space.
     text = re.sub(r'[ \t]+', ' ', text)
 
+    # 3c: Collapse vertical whitespace blocks, preserving paragraph breaks.
+    def collapse_newline_whitespace(match):
+        if '\n\n' in match.group(0):
+            return '\n\n'
+        else:
+            return '\n'
+    text = re.sub(r'(\s*\n\s*)+', collapse_newline_whitespace, text)
+
     return text.strip()
+
+def _normalize_repeated_punctuation(text: str) -> str:
+    """
+    Applies a set of ordered, best-practice rules to normalize repeated punctuation.
+    The order is critical to handle complex cases before simple ones.
+    """
+    # Rule 1 (Highest Priority): Handle interleaved interrobangs.
+    text = re.sub(r'(!\?|\?!){2,}', '?!', text)
+    # Rule 2: Normalize sequences of hyphens to a proper em-dash for dialogue.
+    text = re.sub(r'--+', '—', text)
+    # Rule 3: Normalize sequences of periods to a standard ellipsis.
+    text = re.sub(r'\.{4,}', '...', text)
+    # Rule 4 (General Fallback): Collapse any other single repeating punctuation
+    # mark (3 or more times) down to a single instance.
+    text = re.sub(r'([!?,;:])\1{2,}', r'\1', text)
+    return text
+
+def _normalize_global_stylistic_patterns(text: str, options: TextProcessingOptions) -> str:
+    """
+    Applies normalizations that affect the global structure of the text,
+    such as paragraph breaks. This must run before sentence segmentation.
+    """
+    
+    # The order of these operations is critical for correctness.
+    
+    # 1. Normalize scene breaks (highest priority, line-based context).
+    if options.normalize_scene_breaks:
+        def scene_break_replacer(match: re.Match) -> str:
+            symbols_only = re.sub(r'\s', '', match.group(0))
+            if len(symbols_only) >= options.min_scene_break_length:
+                return '\n\n'
+            return match.group(0)
+        text = re.sub(r'^[^\w\n]+$', scene_break_replacer, text, flags=re.MULTILINE)
+
+    # 2. Normalize specific, defined punctuation patterns.
+    # This runs BEFORE the general symbol rule to handle cases like '---' -> '—'.
+    if options.normalize_repeated_punctuation:
+        text = _normalize_repeated_punctuation(text)
+    
+    # 3. Truncate repeated alphanumeric characters.
+    if options.max_repeated_alpha_chars is not None:
+        limit = options.max_repeated_alpha_chars
+        pattern = re.compile(r'([a-zA-Z])\1{' + str(limit) + r',}', re.IGNORECASE)
+        text = pattern.sub(lambda m: m.group(1) * limit, text)
+
+    # 4. General "catch-all" for any other repeated symbol.
+    # This runs AFTER the specific punctuation rules.
+    if options.max_repeated_symbol_chars is not None:
+        limit = options.max_repeated_symbol_chars
+        # This regex targets any non-alphanumeric, non-whitespace character that
+        # isn't part of the specific punctuation rules handled above.
+        # It's a robust fallback for things like '$$$', '###', '***'.
+        pattern = re.compile(r'([^\w\s.?!—,:;])\1{' + str(limit) + r',}')
+        text = pattern.sub(lambda m: m.group(1) * limit, text)
+
+    return text
+
+def _normalize_local_stylistic_patterns(text: str, options: TextProcessingOptions) -> str:
+    """
+    Applies normalizations that affect intra-sentence patterns. This can
+    safely run on individual sentences after segmentation.
+    """
+    # 1. Normalize stuttering patterns.
+    if options.normalize_stuttering:
+        # Correctly handles case and repeated stutters (e.g., W-w-what -> What).
+        text = re.sub(r'\b([A-Za-z])(?:[-.]\1)+', r'\1', text, flags=re.IGNORECASE)
+
+    # 2. Normalize emphasis markers.
+    if options.normalize_emphasis:
+        # First, handle double markers (e.g., **word** or __word__) to ensure they match.
+        text = re.sub(r'(\*\*|__)(.+?)\1', r'\2', text)
+        # Then, handle single markers (e.g., *word* or _word_).
+        text = re.sub(r'(\*|_)(.+?)\1', r'\2', text)
+    
+    return text
 
 def _normalize_sentence_spacing_and_ending(sentence: str) -> str:
     """
@@ -148,48 +252,69 @@ def _normalize_sentence_spacing_and_ending(sentence: str) -> str:
 
 def _prepare_and_segment_sentences(text: str, options: TextProcessingOptions) -> List[str]:
     """
-    Executes the main text preparation pipeline to produce a clean list of
-    synthesis-ready units (sentences or sub-sentences).
-
-    Crucially, this function guarantees that no string in the output list will be
-    longer than `options.max_chunk_length`.
+    Executes the main text preparation pipeline using a multi-stage process
+    to produce a clean list of synthesis-ready units.
     """
-    # --- Step 1: Unicode and Whitespace Normalization ---
-    text = _normalize_whitespace_and_unicode(text)
+    # Step 1: Clean and normalize text.
+    text = _normalize_unicode(text)
+    text = _clean_unicode_characters(text)
+    text = _normalize_whitespace(text)
     if not text:
         return []
+    
+    # Step 2: Apply global normalizations that affect text structure (e.g., scene breaks)
+    # This must run BEFORE sentence segmentation.
+    text = _normalize_global_stylistic_patterns(text, options)
 
-    # --- Step 2: Bracket Removal (Optional) ---
+    # Step 3: Bracket Removal (Optional)
     if options.remove_bracketed_text:
         text = re.sub(r'\[.*?\]', '', text)
         text = re.sub(r'\(.*?\)', '', text)
-    
-    # --- Step 3: Sentence Segmentation (pysbd) ---
-    # pysbd works best on cased, properly punctuated text.
+
+    # Step 4: Sentence Segmentation using the cleaned, structured text.
     segmenter = get_segmenter(options.text_language)
     sentences = segmenter.segment(text)
 
-    # --- Step 4: Text Normalization (NeMo) ---
+    # Step 5: Text Normalization (NeMo) for numbers, dates, etc.
     if options.use_nemo_normalizer:
-        # NeMo converts numbers, currencies, dates, etc., to their spoken form.
         normalizer = get_normalizer(options.text_language)
         sentences = normalizer.normalize_list(sentences)
     
-    # --- Step 5: Post-processing and Force Splitting ---
-    final_sentence_units = []
+    # Step 5.5: Tokenize Paragraph Breaks.
+    tokenized_sentences = []
     for sent in sentences:
-        # 5a. Normalize internal spacing and ensure final punctuation.
+        # If a sentence contains a paragraph break, split it and insert our token.
+        if '\n\n' in sent:
+            # Split the sentence by the paragraph break.
+            parts = sent.split('\n\n')
+            for i, part in enumerate(parts):
+                part = part.strip()
+                if part:
+                    tokenized_sentences.append(part)
+                # Add the token between the parts, effectively replacing the '\n\n'.
+                if i < len(parts) - 1:
+                    tokenized_sentences.append(PARAGRAPH_BREAK_TOKEN)
+        else:
+            # If there's no break, add the sentence as is.
+            tokenized_sentences.append(sent)
+
+    # Step 6: Final per-sentence processing loop.
+    final_sentence_units = []
+    for sent in tokenized_sentences:
+        # If the sentence is our special token, pass it through directly.
+        if sent == PARAGRAPH_BREAK_TOKEN:
+            final_sentence_units.append(PARAGRAPH_BREAK_TOKEN)
+            continue
+        # Otherwise, it's a sentence that needs final normalization.
+
+        # 6a. Normalize internal spacing and ensure final punctuation.
         sent = _normalize_sentence_spacing_and_ending(sent)
-        # 5b. Optional: Apply advanced, heuristic cleaning rules on the isolated sentence.
-        if options.apply_advanced_cleaning:
-            # Handle stuttering/hesitation (e.g., "W-what?", "b-but")
-            sent = re.sub(r'\b([A-Za-z])-(\1[A-Za-z]*)', r'\2', sent, flags=re.IGNORECASE)
-            # Handle emphasis markers by removing only the markers: * and _.
-            sent = re.sub(r'([*_])(.+?)\1', r'\2', sent)
-        # 5c. Optional: Lowercasing is done *after* segmentation, as case is a cue for pysbd.
+        # 6b. Apply local, intra-sentence stylistic normalizations.
+        sent = _normalize_local_stylistic_patterns(sent, options)
+        # 6c. Optional: Lowercasing.
         if options.to_lowercase:
             sent = sent.lower()
-        # 5d. Final strip
+        # 6d. Final strip to remove any leading/trailing whitespace.
         sent = sent.strip()
 
         if not sent:
@@ -361,57 +486,72 @@ def _chunk_sentences_greedy(sentences: List[str], options: TextProcessingOptions
 def process_and_chunk_text(text: str, options: TextProcessingOptions) -> List[TextChunk]:
     """
     The main entry point for cleaning, normalizing, and chunking text for TTS.
-    This function returns a list of TextChunk objects, which include metadata
-    about the type of boundary that follows each chunk.
+    This function consumes a tokenized stream of sentences and paragraph markers
+    to produce the final list of TextChunk objects.
     """
-    # The Paragraph strategy has a special case where it processes paragraph by paragraph.
-    # For all other strategies, we prepare sentences from the whole text at once.
+    # Step 1: Get the clean, tokenized stream of sentences and paragraph markers.
+    all_units = _prepare_and_segment_sentences(text, options)
     
+    # Step 2: Reconstruct paragraph groupings based on the token.
+    sentence_groups: List[List[str]] = []
+    current_group: List[str] = []
+    for unit in all_units:
+        if unit == PARAGRAPH_BREAK_TOKEN:
+            if current_group:
+                sentence_groups.append(current_group)
+            current_group = []
+        else:
+            current_group.append(unit)
+    if current_group:
+        sentence_groups.append(current_group)
+
+    # Step 3: Apply the final chunking strategy to the sentence groups.
     strategy = options.chunking_strategy
-    structured_chunks: List[TextChunk] = []
+    final_chunks: List[TextChunk] = []
 
     if strategy == TextChunkingStrategy.SIMPLE:
-        # For 'SIMPLE', we prepare sentences to get all normalization benefits,
-        # but then we join and re-split them without regard for sentence boundaries,
-        # which is the spirit of this strategy.
-        sentences = _prepare_and_segment_sentences(text, options)
-        full_processed_text = " ".join(sentences)
+        # For SIMPLE, we ignore paragraph structure.
+        full_processed_text = " ".join([s for group in sentence_groups for s in group])
         chunks_text = _force_split_long_chunk(full_processed_text, options.max_chunk_length)
         if chunks_text:
             # All but the last chunk are hard-limit splits.
             for chunk in chunks_text[:-1]:
-                structured_chunks.append(TextChunk(chunk, BoundaryType.HARD_LIMIT))
-            # The final chunk is considered a sentence end.
-            structured_chunks.append(TextChunk(chunks_text[-1], BoundaryType.SENTENCE))
+                final_chunks.append(TextChunk(chunk, BoundaryType.HARD_LIMIT))
+            final_chunks.append(TextChunk(chunks_text[-1], BoundaryType.SENTENCE))
 
-    else:  # PARAGRAPH, BALANCED, or GREEDY
-        # These strategies all operate on pre-segmented, length-validated units.
+    else: # PARAGRAPH, BALANCED, or GREEDY
         chunker_func = {
             TextChunkingStrategy.PARAGRAPH: _chunk_sentences_balanced,
             TextChunkingStrategy.BALANCED: _chunk_sentences_balanced,
             TextChunkingStrategy.GREEDY: _chunk_sentences_greedy,
         }.get(strategy)
 
-        if strategy == TextChunkingStrategy.PARAGRAPH:
-            paragraphs = re.split(r'\n{2,}', text.strip())
-            for para in paragraphs:
-                if not para.strip(): continue
-                sentences = _prepare_and_segment_sentences(para, options)
-                para_chunks_text = chunker_func(sentences, options)
-                # Assign boundary types to the chunks of this paragraph
-                if para_chunks_text:
-                    for chunk in para_chunks_text[:-1]:
-                        structured_chunks.append(TextChunk(chunk, BoundaryType.SENTENCE))
-                    # The last chunk of a paragraph gets a PARAGRAPH boundary.
-                    structured_chunks.append(TextChunk(para_chunks_text[-1], BoundaryType.PARAGRAPH))
-        else: # BALANCED or GREEDY
-            sentences = _prepare_and_segment_sentences(text, options)
-            chunks_text = chunker_func(sentences, options)
-            # All chunks from these strategies are sentence-based.
-            for chunk in chunks_text:
-                structured_chunks.append(TextChunk(chunk, BoundaryType.SENTENCE))
-    
+        # For BALANCED/GREEDY, treat the whole text as a single logical group.
+        if strategy != TextChunkingStrategy.PARAGRAPH:
+            all_sentences_flat = [s for group in sentence_groups for s in group]
+            sentence_groups = [all_sentences_flat] if all_sentences_flat else []
+
+        for i, group in enumerate(sentence_groups):
+            if not group: continue
+            
+            group_chunks_text = chunker_func(group, options)
+            if not group_chunks_text: continue
+            
+            # Assign boundary types to the chunks of this group.
+            for chunk in group_chunks_text[:-1]:
+                final_chunks.append(TextChunk(chunk, BoundaryType.SENTENCE))
+            
+            # The last chunk of a group is special.
+            is_last_group = (i == len(sentence_groups) - 1)
+            # Use a PARAGRAPH break unless it's the very end of the text.
+            boundary = (
+                BoundaryType.PARAGRAPH if strategy == TextChunkingStrategy.PARAGRAPH and not is_last_group
+                else BoundaryType.SENTENCE
+            )
+            final_chunks.append(TextChunk(group_chunks_text[-1], boundary))
+
     # Filter out any empty chunks that might have been created
-    final_chunks = [chunk for chunk in structured_chunks if chunk.text]
+    final_chunks = [chunk for chunk in final_chunks if chunk.text]
+
     logging.info(f"Processed text into {len(final_chunks)} chunks using '{strategy}' strategy.")
     return final_chunks

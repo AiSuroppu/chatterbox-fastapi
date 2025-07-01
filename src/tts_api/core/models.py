@@ -17,7 +17,36 @@ class TextProcessingOptions(BaseModel):
     to_lowercase: bool = Field(False, description="Convert input text to lowercase.")
     remove_bracketed_text: bool = Field(False, description="Remove text in brackets [] and parentheses ().")
     use_nemo_normalizer: bool = Field(False, description="Use NeMo to normalize numbers, dates, currencies, etc., to words.")
-    apply_advanced_cleaning: bool = Field(False, description="Apply advanced, heuristic cleaning rules like stutter removal ('b-but') and emphasis normalization ('*word*').")
+    normalize_scene_breaks: bool = Field(
+        True, description="Collapse character sequences that appear to be scene breaks into paragraph breaks."
+    )
+    min_scene_break_length: int = Field(
+        3, ge=2, description=(
+            "A line must contain at least this many non-whitespace characters to be considered a scene break. "
+            "Helps prevent stray punctuation or short emphasis lines from being misinterpreted."
+        )
+    )
+    normalize_repeated_punctuation: bool = Field(
+        True, description=(
+            "Enables a multi-stage process to normalize repeated and interleaved punctuation "
+            "into TTS-friendly forms (e.g., '?!?!' -> '?!', '---' -> '—', '....' -> '...')."
+        )
+    )
+    normalize_emphasis: bool = Field(
+        True, description="Remove emphasis markers like '*' and '_' from around words (e.g., '*word*' -> 'word')."
+    )
+    normalize_stuttering: bool = Field(
+        True, description="Collapse stuttering patterns (e.g., 'w-w-what' -> 'what')."
+    )
+    max_repeated_alpha_chars: Optional[int] = Field(
+        4, ge=1, description="Truncate sequences of a repeated letter to this length (e.g., 'Ahhhhhh' -> 'Ahhh' with a value of 3). Set to None to disable."
+    )
+    max_repeated_symbol_chars: Optional[int] = Field(
+        1, ge=1, description=(
+            "Truncate sequences of any other repeated symbol (not covered by punctuation rules, e.g., '###', '***', '$$$') to this length. "
+            "This is a general fallback rule that runs after specific punctuation normalization. Set to None to disable."
+        )
+    )
     chunking_strategy: TextChunkingStrategy = Field(
         TextChunkingStrategy.PARAGRAPH, 
         description=(
