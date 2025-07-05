@@ -25,7 +25,8 @@ dependencies = [
     "nemo_text_processing",
     "python-multipart",
     "pyphen",
-    "cachetools"
+    "cachetools",
+    "httpx"
 ]
 
 [project.urls]

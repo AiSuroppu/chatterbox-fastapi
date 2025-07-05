@@ -138,6 +138,13 @@ def main(engine_name, cuda_version_override):
         f.write("# LRU cache size for the pyphen.Pyphen dictionary instances.\n")
         f.write("#PYPHEN_CACHE_SIZE=4\n\n")
 
+        f.write("# The full URL to the external alignment API endpoint.\n")
+        f.write('#ALIGNMENT_API_URL=""\n')
+        f.write("# The secret bearer API key for authenticating with the alignment API.\n")
+        f.write('#ALIGNMENT_API_KEY=""\n')
+        f.write("# Timeout in seconds for requests to the alignment API.\n")
+        f.write("ALIGNMENT_API_TIMEOUT=10\n\n")
+
         f.write("# --- Chatterbox Specific Settings ---\n")
         f.write("# The maximum number of text segments to process in a single batch for Chatterbox.\n")
         f.write("# Increase on high-VRAM GPUs for better throughput.\n")

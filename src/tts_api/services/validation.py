@@ -3,14 +3,18 @@ import math
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torchaudio
 
 from tts_api.core.models import ValidationOptions, PostProcessingOptions
-from tts_api.services.audio_processor import get_speech_timestamps as run_vad_on_waveform
 from tts_api.utils.pyphen_cache import get_pyphen
+from tts_api.services.alignment.interface import AlignmentResult
+
+# Use a forward reference to avoid circular import issues at runtime
+if TYPE_CHECKING:
+    from tts_api.services.tts_service import AudioAnalysis
 
 @dataclass
 class ValidationResult:
@@ -26,32 +30,13 @@ class ValidationContext:
     validation_params: ValidationOptions
     post_processing_params: PostProcessingOptions
     language: str
-    _precomputed_vad_timestamps: Optional[List[Dict]] = None
+    
+    # Data is passed in from the analysis step, not computed here.
+    initial_speech_segments: List[Dict]
+    alignment_result: Optional[AlignmentResult]
 
-    _vad_results: Optional[Tuple[List[Dict], torch.Tensor]] = None
     _filtered_speech_segments: Optional[List[Dict]] = None
     _syllable_count: Optional[int] = None
-
-    def _run_vad_once(self):
-        if self._vad_results is not None:
-            return
-
-        if self._precomputed_vad_timestamps is not None:
-            logging.debug("Using pre-computed VAD timestamps for validation.")
-            self._vad_results = (self._precomputed_vad_timestamps, None)
-            return
-
-        logging.debug("Running VAD transformation for validation context...")
-        # Use the centralized function from audio_processor
-        timestamps = run_vad_on_waveform(
-            self.original_waveform, self.sample_rate, self.post_processing_params
-        )
-        self._vad_results = (timestamps, None)
-
-    @property
-    def initial_speech_segments(self) -> List[Dict]:
-        self._run_vad_once()
-        return self._vad_results[0]
 
     @property
     def filtered_speech_segments(self) -> List[Dict]:
@@ -264,6 +249,45 @@ class MaxContiguousSilenceValidator(AbstractValidator):
             return ValidationResult(is_ok=False, reason=f"Longest silent gap ({max_s:.2f}s) exceeds max")
         return ValidationResult(is_ok=True)
 
+class AlignmentValidator(AbstractValidator):
+    def is_valid(self, context: ValidationContext) -> ValidationResult:
+        if not context.validation_params.enable_alignment_validation:
+            return ValidationResult(is_ok=True)
+
+        result = context.alignment_result
+
+        if result is None or not result.words:
+            return ValidationResult(is_ok=False, reason="Forced alignment failed or produced no words")
+        
+        scores = [w.score for w in result.words if w.score is not None]
+        if not scores:
+            return ValidationResult(is_ok=False, reason="Alignment produced words but no scores")
+            
+        # 1. Check for individual words with very low scores
+        min_score = min(scores)
+        if min_score < context.validation_params.min_word_alignment_score:
+            low_scoring_word = next((w.word for w in result.words if w.score == min_score), "unknown")
+            return ValidationResult(
+                is_ok=False,
+                reason=f"Word '{low_scoring_word}' has very low alignment score ({min_score:.2f})"
+            )
+        
+        # 2. Check for sequences of low-scoring words using a sliding window
+        window_size = context.validation_params.low_score_window_size
+        window_threshold = context.validation_params.low_score_window_avg_threshold
+        if len(scores) >= window_size:
+            for i in range(len(scores) - window_size + 1):
+                window = scores[i:i + window_size]
+                avg_score = sum(window) / len(window)
+                if avg_score < window_threshold:
+                    window_words = " ".join([w.word for w in result.words[i:i + window_size]])
+                    return ValidationResult(
+                        is_ok=False,
+                        reason=f"Sequence of words '{window_words}' has low avg score ({avg_score:.2f})"
+                    )
+
+        return ValidationResult(is_ok=True)
+
 # STAGE 4
 class ClippingValidator(AbstractValidator):
     def is_valid(self, context: ValidationContext) -> ValidationResult:
@@ -372,22 +396,37 @@ class SpectralCentroidValidator(AbstractValidator):
 
 PRE_FILTER_VALIDATORS = [SilenceThresholdValidator()]
 ALL_FILTERS = [LowEnergySegmentFilter()]
-POST_FILTER_VALIDATORS = [VoicedDurationValidator(), MaxContiguousSilenceValidator()]
+POST_FILTER_VALIDATORS = [VoicedDurationValidator(), MaxContiguousSilenceValidator(), AlignmentValidator()]
 QUALITY_VALIDATORS = [ClippingValidator(), SpectralCentroidValidator()]
 
 def run_validation_pipeline(
-    waveform: torch.Tensor, sample_rate: int, text_chunk: str,
-    validation_params: ValidationOptions, post_processing_params: PostProcessingOptions, language: str,
-    vad_speech_timestamps: Optional[List[Dict]] = None
+    waveform: torch.Tensor,
+    sample_rate: int,
+    text_chunk: str,
+    validation_params: ValidationOptions,
+    post_processing_params: PostProcessingOptions,
+    language: str,
+    analysis_data: 'AudioAnalysis'
 ) -> ValidationResult:
+    """
+    Runs the full validation pipeline using pre-computed analysis data.
+    """
+    # Initialize the context directly with the pre-computed data.
     context = ValidationContext(
-        waveform, sample_rate, text_chunk, validation_params, post_processing_params,
-        language, _precomputed_vad_timestamps=vad_speech_timestamps
+        waveform,
+        sample_rate,
+        text_chunk,
+        validation_params,
+        post_processing_params,
+        language,
+        initial_speech_segments=analysis_data.vad_speech_timestamps,
+        alignment_result=analysis_data.alignment_result
     )
     
     for v_list in [PRE_FILTER_VALIDATORS, POST_FILTER_VALIDATORS, QUALITY_VALIDATORS]:
         for validator in v_list:
             result = validator.is_valid(context)
-            if not result.is_ok: return result
+            if not result.is_ok:
+                return result # Return early on failure
 
     return ValidationResult(is_ok=True)

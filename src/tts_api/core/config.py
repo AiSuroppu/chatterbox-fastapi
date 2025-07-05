@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     # Defaults to ./.cache/nemo within the project root.
     NEMO_CACHE_DIR: str = str(DEFAULT_NEMO_CACHE_DIR)
 
+    # The full URL to the external alignment API endpoint.
+    # Example: ALIGNMENT_API_URL="http://localhost:8001/align"
+    ALIGNMENT_API_URL: str = ""
+    # The secret bearer API key for authenticating with the alignment API.
+    ALIGNMENT_API_KEY: str = ""
+    # Timeout in seconds for requests to the alignment API.
+    ALIGNMENT_API_TIMEOUT: int = 10
+
     # LRU cache size for the NeMo Normalizer instances.
     NEMO_NORMALIZER_CACHE_SIZE: int = 4
 

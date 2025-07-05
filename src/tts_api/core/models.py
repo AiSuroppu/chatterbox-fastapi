@@ -92,6 +92,17 @@ class ValidationOptions(BaseModel):
             "When a word is identified as low-complexity (e.g., 'Ahhhhh'), its syllable count for the max duration budget is estimated as (word_length / this_value). This provides a scalable budget for onomatopoeia and other expressive sounds."))
     low_complexity_max_duration_per_syllable: float = Field(
         0.600, ge=0.0, le=10.0, description="The relaxed maximum speech duration per syllable for words identified as low-complexity (e.g., onomatopoeia) when word-level analysis is enabled.")
+    # --- Alignment Validation Settings ---
+    enable_alignment_validation: bool = Field(
+        False, description=(
+            "Master switch to enable WhisperX-based alignment validation. "
+            "If true, this replaces the VAD speech ratio for scoring and adds new validation steps."))
+    min_word_alignment_score: float = Field(
+        0.5, ge=0.0, le=1.0, description="Fail if any word has an alignment score below this threshold. A lower value is more lenient.")
+    low_score_window_size: int = Field(
+        3, ge=2, le=10, description="The number of consecutive words in a sliding window to check for persistently low scores.")
+    low_score_window_avg_threshold: float = Field(
+        0.6, ge=0.0, le=1.0, description="Fail if the average alignment score of words within the sliding window falls below this threshold.")
     
     # Audio quality validation
     max_clipping_percentage: Optional[float] = Field(

@@ -14,6 +14,9 @@ from tts_api.tts_engines.base import AbstractTTSEngine
 from tts_api.services.text_processing import process_and_chunk_text, TextChunk, BoundaryType
 from tts_api.services.audio_processor import post_process_audio, get_speech_timestamps, calculate_speech_ratio_from_timestamps
 from tts_api.services.validation import run_validation_pipeline, ValidationResult
+from tts_api.services.alignment.interface import AlignmentResult
+from tts_api.services.alignment.manager import get_alignment_service
+
 
 def set_seed(seed: int):
     torch.manual_seed(seed)
@@ -31,12 +34,19 @@ class JobStatus(Enum):
     FAILED_FINAL = auto()
 
 @dataclass
+class AudioAnalysis:
+    """A container for pre-computed metrics of a generated audio chunk."""
+    vad_speech_timestamps: List[Dict[str, int]]
+    alignment_result: Optional[AlignmentResult] = None
+
+@dataclass
 class GeneratedSegment:
     """Holds the result of a single successful audio generation for a text chunk."""
     waveform: torch.Tensor
     sample_rate: int
-    # Pre-computed VAD results to avoid re-calculation
-    vad_speech_timestamps: List[Dict[str, int]]
+    # A single object containing all analysis results for this segment.
+    analysis: AudioAnalysis
+    # This score can be a VAD ratio or an aggregate alignment score.
     score: float
 
 @dataclass
@@ -91,13 +101,14 @@ def _get_initial_seed(req_seed: Union[int, List[int]], candidate_idx: int) -> in
 
 def _trim_waveform_with_vad(segment: GeneratedSegment) -> torch.Tensor:
     """Trims silence from a waveform using its pre-computed VAD timestamps."""
-    if not segment.vad_speech_timestamps:
+    timestamps = segment.analysis.vad_speech_timestamps
+    if not timestamps:
         # If VAD found no speech, return an empty tensor.
         num_channels = segment.waveform.shape[0] if segment.waveform.ndim > 1 else 1
         return torch.zeros((num_channels, 0), dtype=segment.waveform.dtype, device=segment.waveform.device)
     
-    start_sample = segment.vad_speech_timestamps[0]['start']
-    end_sample = segment.vad_speech_timestamps[-1]['end']
+    start_sample = timestamps[0]['start']
+    end_sample = timestamps[-1]['end']
     return segment.waveform[..., start_sample:end_sample]
 
 def _assemble_final_waveform(
@@ -131,29 +142,30 @@ def _assemble_final_waveform(
         # If trim_segment_silence is false, we keep the original waveform unless a lead-in/out override forces a trim.
         
         waveform_to_process = segment.waveform
+        vad_timestamps = segment.analysis.vad_speech_timestamps
         
         # Trim start if it's the first segment and lead-in is being set
         if is_first_segment and post_processing_opts.lead_in_silence_ms is not None:
-            if segment.vad_speech_timestamps:
-                start_sample = segment.vad_speech_timestamps[0]['start']
+            if vad_timestamps:
+                start_sample = vad_timestamps[0]['start']
                 waveform_to_process = waveform_to_process[..., start_sample:]
         
         # Trim end if it's the last segment and lead-out is being set
         if is_last_segment and post_processing_opts.lead_out_silence_ms is not None:
-            if segment.vad_speech_timestamps:
-                end_sample = segment.vad_speech_timestamps[-1]['end']
+            if vad_timestamps:
+                end_sample = vad_timestamps[-1]['end']
                 waveform_to_process = waveform_to_process[..., :end_sample]
 
         # For inter-segment handling, trim both ends if requested.
         if post_processing_opts.trim_segment_silence:
             # For the first segment, only trim end (start is handled by lead-in logic)
             if is_first_segment and not is_last_segment:
-                if segment.vad_speech_timestamps:
-                    waveform_to_process = waveform_to_process[..., :segment.vad_speech_timestamps[-1]['end']]
+                if vad_timestamps:
+                    waveform_to_process = waveform_to_process[..., :vad_timestamps[-1]['end']]
             # For the last segment, only trim start (end is handled by lead-out logic)
             elif is_last_segment and not is_first_segment:
-                if segment.vad_speech_timestamps:
-                     waveform_to_process = waveform_to_process[..., segment.vad_speech_timestamps[0]['start']:]
+                if vad_timestamps:
+                     waveform_to_process = waveform_to_process[..., vad_timestamps[0]['start']:]
             # For middle segments, trim both ends
             elif not is_first_segment and not is_last_segment:
                 waveform_to_process = _trim_waveform_with_vad(segment)
@@ -199,8 +211,6 @@ def generate_speech_from_request(
         params=engine_params,
         ref_audio_data=ref_audio_data
     )
-
-    final_waveform = None
 
     logging.info(f"Processing {len(input_segments)} text segments. Generating {req.best_of} candidate(s) per segment.")
 
@@ -270,10 +280,27 @@ def generate_speech_from_request(
                 waveform = generated_waveforms[i]
                 
                 if waveform is None or waveform.numel() == 0:
-                    final_result = ValidationResult(is_ok=False, reason="Engine returned empty/None output")
+                    validation_ok = False
+                    validation_reason = "Engine returned empty/None output"
                 else:
-                    # Run VAD once and pass results to validation and scoring
+                    # 1. ANALYSIS: Compute all metrics upfront.
                     vad_timestamps = get_speech_timestamps(waveform, engine.sample_rate, req.post_processing)
+                    
+                    alignment_data: Optional[AlignmentResult] = None
+                    if req.validation.enable_alignment_validation:
+                        alignment_service = get_alignment_service()
+                        waveform_mono = torch.mean(waveform, dim=0) if waveform.ndim > 1 else waveform
+                        audio_np = waveform_mono.cpu().numpy().astype(np.float32)
+                        alignment_data = alignment_service.align(
+                            audio_data=audio_np,
+                            sample_rate=engine.sample_rate,
+                            text=job.text,
+                            language=req.text_processing.text_language,
+                        )
+
+                    analysis_data = AudioAnalysis(vad_speech_timestamps=vad_timestamps, alignment_result=alignment_data)
+
+                    # 2. VALIDATION: Pass pre-computed data to the pipeline.
                     final_result = run_validation_pipeline(
                         waveform=waveform,
                         sample_rate=engine.sample_rate,
@@ -281,23 +308,29 @@ def generate_speech_from_request(
                         validation_params=req.validation,
                         post_processing_params=req.post_processing,
                         language=req.text_processing.text_language,
-                        vad_speech_timestamps=vad_timestamps
+                        analysis_data=analysis_data
                     )
+                    validation_ok, validation_reason = final_result.is_ok, final_result.reason
                 
-                if final_result.is_ok:
+                if validation_ok:
                     job.status = JobStatus.SUCCESS
-                    score = calculate_speech_ratio_from_timestamps(vad_timestamps, waveform.shape[-1])
-                    job.result = GeneratedSegment(
-                        waveform=waveform,
-                        sample_rate=engine.sample_rate,
-                        vad_speech_timestamps=vad_timestamps,
-                        score=score
-                    )
-                    job.last_failure_reason = None # Clear reason on success
+                    # 3. SCORING: Use the same analysis data.
+                    if req.validation.enable_alignment_validation:
+                        if analysis_data.alignment_result and analysis_data.alignment_result.words:
+                            word_scores = [w.score for w in analysis_data.alignment_result.words if w.score is not None]
+                            score = sum(word_scores) / len(word_scores) if word_scores else 0.0
+                        else:
+                            score = 0.0
+                            logging.warning(f"Alignment validation passed but no alignment data found for scoring. Defaulting score to 0.")
+                    else:
+                        score = calculate_speech_ratio_from_timestamps(analysis_data.vad_speech_timestamps, waveform.shape[-1])
+                    
+                    job.result = GeneratedSegment(waveform=waveform, sample_rate=engine.sample_rate, analysis=analysis_data, score=score)
+                    job.last_failure_reason = None
                 else:
-                    job.last_failure_reason = final_result.reason # Store failure reason
+                    job.last_failure_reason = validation_reason
                     if job.attempt_count <= req.max_retries:
-                        logging.warning(f"Validation failed for chunk (seg={job.segment_idx}, cand={job.candidate_idx}, att={job.attempt_count}, seed={job.current_seed}): {final_result.reason}. Will retry.")
+                        logging.warning(f"Validation failed for chunk (seg={job.segment_idx}, cand={job.candidate_idx}, att={job.attempt_count}, seed={job.current_seed}): {validation_reason}. Will retry.")
 
     # Phase 3: Finalization & Assembly
     final_failures = 0
@@ -335,14 +368,12 @@ def generate_speech_from_request(
     if not final_segments:
         raise EngineExecutionError("TTS generation failed to produce any audio.")
 
-    # Use the new assembly helper function
     final_waveform = _assemble_final_waveform(
         final_segments=final_segments,
         input_segment_info=input_segments,
         post_processing_opts=req.post_processing,
         sample_rate=engine.sample_rate
     )
-
 
     if final_waveform is None or final_waveform.numel() == 0:
         raise EngineExecutionError("TTS generation failed to produce any final audio after assembly.")
