@@ -187,7 +187,8 @@ def post_process_audio(
     output_args = {'ar': str(sample_rate)}
     if options.export_format == ExportFormat.MP3:
         output_format = 'mp3'
-        output_args['audio_bitrate'] = '320k'
+        # Use the configurable constant bitrate to ensure timing is preserved.
+        output_args['audio_bitrate'] = options.mp3_bitrate
     elif options.export_format == ExportFormat.FLAC:
         output_format = 'flac'
     else: # WAV

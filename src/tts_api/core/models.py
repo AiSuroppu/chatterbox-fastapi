@@ -2,6 +2,7 @@ from enum import Enum
 from pydantic import BaseModel, Field
 from typing import List, Union, Optional
 
+from tts_api.services.alignment.interface import WordSegment
 
 # --- Generic Request Component Models ---
 
@@ -158,6 +159,7 @@ class PostProcessingOptions(BaseModel):
             "A value of 0 will trim all lead-out silence."))
 
     export_format: ExportFormat = Field(ExportFormat.MP3, description="Final audio format.")
+    mp3_bitrate: str = Field("192k", description=("The bitrate for MP3 exports, e.g., '192k', '320k'."))
 
 
 # --- Main Request Models ---
@@ -168,6 +170,7 @@ class BaseTTSRequest(BaseModel):
     seed: Union[int, List[int]] = Field(0, description="Random seed or a list of seeds. If a list is provided, seeds are used sequentially for each generation candidate. A seed of 0 means use a random seed.")
     best_of: int = Field(1, ge=1, le=10, description="Generate multiple speech outputs and automatically return the one with the highest speech-to-audio-duration ratio. Higher values take longer but can improve quality.")
     max_retries: int = Field(1, ge=0, le=20, description="Number of times to retry a failed or low-quality generation for a single text chunk.")
+    return_timestamps: bool = Field(False, description=("If true, the response will be a JSON object containing the audio as a base64 string and a list of word timestamps."))
     validation: ValidationOptions = ValidationOptions()
     text_processing: TextProcessingOptions = TextProcessingOptions()
     post_processing: PostProcessingOptions = PostProcessingOptions()
@@ -202,3 +205,11 @@ class FishSpeechParams(BaseModel):
 class FishSpeechTTSRequest(BaseTTSRequest):
     """The complete request model for the FishSpeech engine endpoint."""
     fish_speech_params: FishSpeechParams = FishSpeechParams()
+
+
+# --- Response Models ---
+
+class TTSResponseWithTimestamps(BaseModel):
+    """The response model when word-level timestamps are requested."""
+    audio_content: str = Field(..., description="The generated audio file, base64 encoded.")
+    word_segments: List[WordSegment] = Field(..., description="A list of all word segments with their start and end times in the final audio.")

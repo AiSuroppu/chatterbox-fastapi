@@ -1,6 +1,7 @@
 import logging
 import json
 import importlib
+import base64
 from dataclasses import dataclass
 from typing import Type, Optional
 from pydantic import BaseModel, ValidationError
@@ -15,7 +16,7 @@ from tts_api.core.exceptions import (
     EngineLoadError,
     InvalidVoiceTokenException
 )
-from tts_api.core.models import BaseTTSRequest, ExportFormat
+from tts_api.core.models import BaseTTSRequest, ExportFormat, TTSResponseWithTimestamps
 from tts_api.tts_engines.base import AbstractTTSEngine
 from tts_api.services.tts_service import generate_speech_from_request
 
@@ -213,7 +214,22 @@ async def get_engine_config(engine_name: str):
 @app.post(
     "/{engine_name}/generate",
     summary="Generate Speech with a Specific Engine",
-    tags=["Generation"]
+    tags=["Generation"],
+    responses={
+        200: {
+            "description": "Successful audio generation. The content type will be audio/mpeg, audio/wav, or audio/flac unless 'return_timestamps' is true.",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "$ref": "#/components/schemas/TTSResponseWithTimestamps"
+                    }
+                },
+                "audio/mpeg": {},
+                "audio/wav": {},
+                "audio/flac": {}
+            }
+        }
+    }
 )
 async def generate_speech(
     engine_name: str,
@@ -255,19 +271,27 @@ async def generate_speech(
         ref_audio_data=ref_audio_data
     )
 
-    media_type = MEDIA_TYPES.get(
-        req.post_processing.export_format,
-        "application/octet-stream"
-    )
+    if req.return_timestamps:
+        audio_bytes = synthesis_result.audio_buffer.getvalue()
+        audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+        response_data = TTSResponseWithTimestamps(
+            audio_content=audio_base64,
+            word_segments=synthesis_result.word_segments or []
+        )
+        return response_data
+    else:
+        media_type = MEDIA_TYPES.get(
+            req.post_processing.export_format,
+            "application/octet-stream"
+        )
 
-    # Prepare the response and add the generic metadata header if it exists
-    response = StreamingResponse(synthesis_result.audio_buffer, media_type=media_type)
-    if synthesis_result.metadata:
-        metadata_json = json.dumps(synthesis_result.metadata)
-        response.headers["X-Generation-Metadata"] = metadata_json
-        logging.info(f"Returning generation metadata in header: {metadata_json}")
+        response = StreamingResponse(synthesis_result.audio_buffer, media_type=media_type)
+        if synthesis_result.metadata:
+            metadata_json = json.dumps(synthesis_result.metadata)
+            response.headers["X-Generation-Metadata"] = metadata_json
+            logging.info(f"Returning generation metadata in header: {metadata_json}")
 
-    return response
+        return response
 
 @app.get("/health", summary="Check API Health", tags=["Management"])
 async def health_check():
