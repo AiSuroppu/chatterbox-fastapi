@@ -279,45 +279,64 @@ def generate_speech_from_request(
                 **generation_kwargs
             )
 
+            # --- Staged processing for batch alignment ---
+            
+            # Stage 1: Initial analysis and collection for alignment
+            analysis_store: Dict[int, Optional[Tuple[torch.Tensor, AudioAnalysis]]] = {}
+            alignment_payload: List[Tuple[np.ndarray, int, str, str]] = []
+            alignment_target_analysis: List[AudioAnalysis] = []
+
             for i, job in enumerate(job_group):
                 job.attempt_count += 1
                 waveform = generated_waveforms[i]
                 
                 if waveform is None or waveform.numel() == 0:
-                    validation_ok, validation_reason = False, "Engine returned empty/None output"
-                else:
-                    # 1. ANALYSIS: Compute all metrics upfront.
-                    vad_timestamps = get_speech_timestamps(waveform, engine.sample_rate, req.post_processing)
-                    
-                    alignment_data: Optional[AlignmentResult] = None
-                    if alignment_needed:
-                        alignment_service = get_alignment_service()
-                        waveform_mono = torch.mean(waveform, dim=0) if waveform.ndim > 1 else waveform
-                        audio_np = waveform_mono.cpu().numpy().astype(np.float32)
-                        alignment_data = alignment_service.align(
-                            audio_data=audio_np,
-                            sample_rate=engine.sample_rate,
-                            text=job.text,
-                            language=req.text_processing.text_language,
-                        )
-
-                    analysis_data = AudioAnalysis(vad_speech_timestamps=vad_timestamps, alignment_result=alignment_data)
-
-                    # 2. VALIDATION: Pass pre-computed data to the pipeline.
-                    final_result = run_validation_pipeline(
-                        waveform=waveform,
-                        sample_rate=engine.sample_rate,
-                        text_chunk=job.text,
-                        validation_params=req.validation,
-                        post_processing_params=req.post_processing,
-                        language=req.text_processing.text_language,
-                        analysis_data=analysis_data
-                    )
-                    validation_ok, validation_reason = final_result.is_ok, final_result.reason
+                    job.last_failure_reason = "Engine returned empty/None output"
+                    analysis_store[i] = None # Mark as failed
+                    continue
                 
-                if validation_ok:
+                vad_timestamps = get_speech_timestamps(waveform, engine.sample_rate, req.post_processing)
+                analysis_data = AudioAnalysis(vad_speech_timestamps=vad_timestamps)
+                analysis_store[i] = (waveform, analysis_data)
+
+                if alignment_needed:
+                    waveform_mono = torch.mean(waveform, dim=0) if waveform.ndim > 1 else waveform
+                    audio_np = waveform_mono.cpu().numpy().astype(np.float32)
+                    alignment_payload.append(
+                        (audio_np, engine.sample_rate, job.text, req.text_processing.text_language)
+                    )
+                    # Keep a direct reference to the analysis object we need to update
+                    alignment_target_analysis.append(analysis_data)
+            
+            # Stage 2: Execute alignment for the entire batch in one call
+            if alignment_payload:
+                alignment_service = get_alignment_service()
+                batch_alignment_results = alignment_service.align_batch(alignment_payload)
+                for i, result in enumerate(batch_alignment_results):
+                    # The lists are parallel, so we can map results back directly
+                    alignment_target_analysis[i].alignment_result = result
+            
+            # Stage 3: Final validation and scoring for the whole group
+            for i, job in enumerate(job_group):
+                stored_data = analysis_store.get(i)
+                if stored_data is None: # Job failed in stage 1
+                    continue
+                
+                waveform, analysis_data = stored_data
+
+                validation_result = run_validation_pipeline(
+                    waveform=waveform,
+                    sample_rate=engine.sample_rate,
+                    text_chunk=job.text,
+                    validation_params=req.validation,
+                    post_processing_params=req.post_processing,
+                    language=req.text_processing.text_language,
+                    analysis_data=analysis_data
+                )
+                
+                if validation_result.is_ok:
                     job.status = JobStatus.SUCCESS
-                    # 3. SCORING: Use the same analysis data.
+                    # SCORING: Use the same analysis data.
                     if req.validation.enable_alignment_validation:
                         if analysis_data.alignment_result and analysis_data.alignment_result.words:
                             word_scores = [w.score for w in analysis_data.alignment_result.words if w.score is not None]
@@ -331,9 +350,9 @@ def generate_speech_from_request(
                     job.result = GeneratedSegment(waveform=waveform, sample_rate=engine.sample_rate, analysis=analysis_data, score=score)
                     job.last_failure_reason = None
                 else:
-                    job.last_failure_reason = validation_reason
+                    job.last_failure_reason = validation_result.reason
                     if job.attempt_count <= req.max_retries:
-                        logging.warning(f"Validation failed for chunk (seg={job.segment_idx}, cand={job.candidate_idx}, att={job.attempt_count}, seed={job.current_seed}): {validation_reason}. Will retry.")
+                        logging.warning(f"Validation failed for chunk (seg={job.segment_idx}, cand={job.candidate_idx}, att={job.attempt_count}, seed={job.current_seed}): {validation_result.reason}. Will retry.")
 
     # Phase 3: Finalization & Assembly
     final_failures = sum(1 for job in all_jobs if job.status != JobStatus.SUCCESS)

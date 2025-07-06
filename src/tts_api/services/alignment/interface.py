@@ -1,6 +1,6 @@
 import numpy as np
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Tuple, List, Optional
 from pydantic import BaseModel, Field
 
 # --- Standardized Data Models for Alignment Results ---
@@ -34,5 +34,23 @@ class AbstractAlignmentService(ABC):
 
         Returns:
             An AlignmentResult object if successful, otherwise None.
+        """
+        pass
+
+    @abstractmethod
+    def align_batch(self, jobs: List[Tuple[np.ndarray, int, str, str]]) -> List[Optional[AlignmentResult]]:
+        """
+        Performs forced alignment on a batch of audio and text jobs.
+
+        Args:
+            jobs: A list of tuples, where each tuple contains:
+                - audio_data (np.ndarray): The audio waveform.
+                - sample_rate (int): The audio sample rate.
+                - text (str): The ground-truth text.
+                - language (str): The language code.
+
+        Returns:
+            A list of AlignmentResult objects or None, corresponding to each input
+            job. The order of the output list MUST match the input list.
         """
         pass
