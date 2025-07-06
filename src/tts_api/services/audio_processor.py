@@ -4,9 +4,9 @@ import io
 import torch
 import torchaudio
 import silero_vad
-from typing import List, Dict
+from typing import List, Dict, Optional
 
-from tts_api.core.models import PostProcessingOptions, ExportFormat
+from tts_api.core.models import PostProcessingOptions, ExportFormat, WordSegment
 
 VAD_INTERNAL_SAMPLE_RATE = 16000 # The fixed rate Silero VAD operates on.
 
@@ -32,6 +32,45 @@ def _get_resampler(from_rate: int, to_rate: int):
             orig_freq=from_rate, new_freq=to_rate
         )
     return _RESAMPLER_CACHE[(from_rate, to_rate)]
+
+def _merge_speech_timestamps(
+    vad_timestamps: List[Dict[str, int]],
+    word_segments: Optional[List[WordSegment]],
+    sample_rate: int
+) -> List[Dict[str, int]]:
+    """
+    Merges VAD timestamps with word alignment timestamps to create a consolidated
+    list of speech segments, preventing words from being cut by the VAD.
+    """
+    if not word_segments:
+        return vad_timestamps
+    
+    # Convert word segments (in seconds) to the same sample-based format as VAD timestamps
+    word_timestamps = []
+    for word in word_segments:
+        if word.start is not None and word.end is not None:
+            word_timestamps.append({
+                'start': int(word.start * sample_rate),
+                'end': int(word.end * sample_rate)
+            })
+
+    # Combine and sort all timestamp segments
+    all_timestamps = sorted(vad_timestamps + word_timestamps, key=lambda x: x['start'])
+
+    if not all_timestamps:
+        return []
+    
+    # Merge overlapping or adjacent segments
+    merged = [all_timestamps[0]]
+    for current in all_timestamps[1:]:
+        last = merged[-1]
+        # If the current segment overlaps or is adjacent to the last one, merge them
+        if current['start'] <= last['end']:
+            last['end'] = max(last['end'], current['end'])
+        else:
+            merged.append(current)
+            
+    return merged
 
 def get_speech_timestamps(
     waveform: torch.Tensor,
@@ -99,28 +138,39 @@ def get_speech_ratio(
 def apply_vad_denoising(
     waveform: torch.Tensor,
     sample_rate: int,
-    options: PostProcessingOptions
+    options: PostProcessingOptions,
+    word_segments: Optional[List[WordSegment]] = None
 ) -> torch.Tensor:
     """
     Applies VAD to a waveform tensor to remove noise in silent segments.
-    This version correctly handles different input sample rates by scaling timestamps.
+    This version is alignment-aware, merging VAD results with word timestamps
+    to prevent accidentally cutting out words.
     """
-    # Use the centralized helper to get speech timestamps in the correct sample rate
-    speech_timestamps = get_speech_timestamps(waveform, sample_rate, options)
+    # 1. Get speech timestamps from VAD as a baseline
+    vad_timestamps = get_speech_timestamps(waveform, sample_rate, options)
+    
+    # 2. Merge with word alignment data to get a consolidated view of speech
+    consolidated_timestamps = _merge_speech_timestamps(vad_timestamps, word_segments, sample_rate)
 
-    # If no speech is detected, return pure silence.
-    if not speech_timestamps:
+    # If no speech is detected by either system, return pure silence.
+    if not consolidated_timestamps:
         return torch.zeros_like(waveform)
     
     output_waveform = torch.zeros_like(waveform)
     fade_samples = int((options.vad_fade_ms / 1000) * sample_rate)
 
-    for segment in speech_timestamps:
+    for segment in consolidated_timestamps:
         # Timestamps are already scaled for the original waveform
         start_sample = segment['start']
         end_sample = segment['end']
         
-        # We copy from the ORIGINAL high-quality waveform
+        # Clamp segments to be within the waveform bounds
+        start_sample = max(0, start_sample)
+        end_sample = min(waveform.shape[-1], end_sample)
+        
+        if start_sample >= end_sample:
+            continue
+            
         segment_to_copy = waveform[..., start_sample:end_sample].clone()
         
         segment_length = segment_to_copy.shape[-1]
@@ -140,7 +190,8 @@ def apply_vad_denoising(
 def post_process_audio(
     waveform: torch.Tensor,
     sample_rate: int,
-    options: PostProcessingOptions
+    options: PostProcessingOptions,
+    word_segments: Optional[List[WordSegment]] = None
 ) -> io.BytesIO:
     """
     Applies requested post-processing to an in-memory audio waveform and returns
@@ -150,8 +201,13 @@ def post_process_audio(
 
     # 1. Apply VAD Denoising in-memory (if requested)
     if options.denoise_with_vad:
-        logging.info("Applying VAD denoiser...")
-        processed_waveform = apply_vad_denoising(processed_waveform, sample_rate, options)
+        logging.info("Applying VAD denoiser (alignment-aware)...")
+        processed_waveform = apply_vad_denoising(
+            processed_waveform, 
+            sample_rate, 
+            options,
+            word_segments
+        )
         logging.info("VAD denoiser applied successfully.")
 
     # Convert tensor to raw audio bytes for ffmpeg's stdin

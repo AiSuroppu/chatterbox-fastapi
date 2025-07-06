@@ -426,7 +426,8 @@ def generate_speech_from_request(
     audio_buffer = post_process_audio(
         final_waveform,
         engine.sample_rate,
-        req.post_processing
+        options=req.post_processing,
+        word_segments=final_word_segments
     )
 
     return SynthesisResult(audio_buffer=audio_buffer, metadata=response_metadata, word_segments=final_word_segments)
