@@ -15,9 +15,8 @@ from tts_api.tts_engines.base import AbstractTTSEngine
 from tts_api.services.text_processing import process_and_chunk_text, TextChunk, BoundaryType
 from tts_api.services.audio_processor import post_process_audio, get_speech_timestamps, calculate_speech_ratio_from_timestamps
 from tts_api.services.validation import run_validation_pipeline, ValidationResult
-from tts_api.services.alignment.interface import AlignmentResult, WordSegment
-from tts_api.services.alignment.manager import get_alignment_service
-
+from tts_api.services.audio_analyzer import analyze_batch, AudioAnalysis, AnalysisJob
+from tts_api.services.alignment.interface import WordSegment
 
 def set_seed(seed: int):
     torch.manual_seed(seed)
@@ -33,12 +32,6 @@ class JobStatus(Enum):
     PENDING = auto()
     SUCCESS = auto()
     FAILED_FINAL = auto()
-
-@dataclass
-class AudioAnalysis:
-    """A container for pre-computed metrics of a generated audio chunk."""
-    vad_speech_timestamps: List[Dict[str, int]]
-    alignment_result: Optional[AlignmentResult] = None
 
 @dataclass
 class GeneratedSegment:
@@ -229,7 +222,7 @@ def generate_speech_from_request(
                 segment_idx=i, candidate_idx=j, text=segment_chunk.text, initial_seed=initial_seed
             ))
 
-    # This flag determines if we need to run the expensive alignment step.
+    # This flag is passed to the analyzer to determine if alignment is needed.
     alignment_needed = req.validation.enable_alignment_validation or req.return_timestamps
 
     # Phase 2: Multi-Pass Processing Loop
@@ -279,50 +272,27 @@ def generate_speech_from_request(
                 **generation_kwargs
             )
 
-            # --- Staged processing for batch alignment ---
-            
-            # Stage 1: Initial analysis and collection for alignment
-            analysis_store: Dict[int, Optional[Tuple[torch.Tensor, AudioAnalysis]]] = {}
-            alignment_payload: List[Tuple[np.ndarray, int, str, str]] = []
-            alignment_target_analysis: List[AudioAnalysis] = []
+            # Analysis
+            analysis_jobs = [
+                AnalysisJob(waveform=wf, sample_rate=engine.sample_rate, text=job.text)
+                for wf, job in zip(generated_waveforms, job_group)
+            ]
+            analysis_results = analyze_batch(
+                jobs=analysis_jobs,
+                post_processing_opts=req.post_processing,
+                alignment_needed=alignment_needed,
+                text_language=req.text_processing.text_language,
+            )
 
+            # Validation and Scoring
             for i, job in enumerate(job_group):
                 job.attempt_count += 1
                 waveform = generated_waveforms[i]
-                
-                if waveform is None or waveform.numel() == 0:
-                    job.last_failure_reason = "Engine returned empty/None output"
-                    analysis_store[i] = None # Mark as failed
-                    continue
-                
-                vad_timestamps = get_speech_timestamps(waveform, engine.sample_rate, req.post_processing)
-                analysis_data = AudioAnalysis(vad_speech_timestamps=vad_timestamps)
-                analysis_store[i] = (waveform, analysis_data)
+                analysis_data = analysis_results[i]
 
-                if alignment_needed:
-                    waveform_mono = torch.mean(waveform, dim=0) if waveform.ndim > 1 else waveform
-                    audio_np = waveform_mono.cpu().numpy().astype(np.float32)
-                    alignment_payload.append(
-                        (audio_np, engine.sample_rate, job.text, req.text_processing.text_language)
-                    )
-                    # Keep a direct reference to the analysis object we need to update
-                    alignment_target_analysis.append(analysis_data)
-            
-            # Stage 2: Execute alignment for the entire batch in one call
-            if alignment_payload:
-                alignment_service = get_alignment_service()
-                batch_alignment_results = alignment_service.align_batch(alignment_payload)
-                for i, result in enumerate(batch_alignment_results):
-                    # The lists are parallel, so we can map results back directly
-                    alignment_target_analysis[i].alignment_result = result
-            
-            # Stage 3: Final validation and scoring for the whole group
-            for i, job in enumerate(job_group):
-                stored_data = analysis_store.get(i)
-                if stored_data is None: # Job failed in stage 1
+                if waveform is None or waveform.numel() == 0 or analysis_data is None:
+                    job.last_failure_reason = "Engine returned empty/None output or analysis failed."
                     continue
-                
-                waveform, analysis_data = stored_data
 
                 validation_result = run_validation_pipeline(
                     waveform=waveform,
@@ -336,8 +306,8 @@ def generate_speech_from_request(
                 
                 if validation_result.is_ok:
                     job.status = JobStatus.SUCCESS
-                    # SCORING: Use the same analysis data.
-                    if req.validation.enable_alignment_validation:
+                    # SCORING: Use the pre-computed analysis data.
+                    if alignment_needed:
                         if analysis_data.alignment_result and analysis_data.alignment_result.words:
                             word_scores = [w.score for w in analysis_data.alignment_result.words if w.score is not None]
                             score = sum(word_scores) / len(word_scores) if word_scores else 0.0
