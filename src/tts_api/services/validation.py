@@ -4,13 +4,14 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple, TYPE_CHECKING
+from collections import deque
 
 import torch
 import torchaudio
 
-from tts_api.core.models import ValidationOptions, PostProcessingOptions
+from tts_api.core.models import ValidationOptions, PostProcessingOptions, ValidationIssue, AlignmentValidationOptions, DipDetection, WeightedWindow
 from tts_api.utils.pyphen_cache import get_pyphen
-from tts_api.services.alignment.interface import AlignmentResult
+from tts_api.services.alignment.interface import AlignmentResult, WordSegment
 
 # Use a forward reference to avoid circular import issues at runtime
 if TYPE_CHECKING:
@@ -250,43 +251,175 @@ class MaxContiguousSilenceValidator(AbstractValidator):
         return ValidationResult(is_ok=True)
 
 class AlignmentValidator(AbstractValidator):
+    """
+    Performs hierarchical, severity-based validation of alignment results.
+    This validator uses a multi-layered system to check for alignment quality,
+    including severity levels based on word length and score, consecutive
+    low-quality words, and other contextual checks.
+    """
     def is_valid(self, context: ValidationContext) -> ValidationResult:
-        if not context.validation_params.enable_alignment_validation:
+        settings = context.validation_params.alignment
+        if not settings.enabled:
             return ValidationResult(is_ok=True)
 
-        result = context.alignment_result
-
-        if result is None or not result.words:
-            return ValidationResult(is_ok=False, reason="Forced alignment failed or produced no words")
+        if context.alignment_result is None or not context.alignment_result.words:
+            return ValidationResult(is_ok=False, reason="Alignment validation failed: No alignment result available.")
         
-        scores = [w.score for w in result.words if w.score is not None]
-        if not scores:
-            return ValidationResult(is_ok=False, reason="Alignment produced words but no scores")
-            
-        # 1. Check for individual words with very low scores
-        min_score = min(scores)
-        if min_score < context.validation_params.min_word_alignment_score:
-            low_scoring_word = next((w.word for w in result.words if w.score == min_score), "unknown")
-            return ValidationResult(
-                is_ok=False,
-                reason=f"Word '{low_scoring_word}' has very low alignment score ({min_score:.2f})"
+        issues = self._perform_validation(context.alignment_result.words, settings)
+        
+        if not issues:
+            return ValidationResult(is_ok=True)
+        else:
+            first_issue = issues[0]
+            reason = (
+                f"Alignment validation failed with {len(issues)} issue(s). "
+                f"First failure: {first_issue.type} on word '{first_issue.word}' (index {first_issue.index}). "
+                f"Details: {first_issue.details}"
             )
-        
-        # 2. Check for sequences of low-scoring words using a sliding window
-        window_size = context.validation_params.low_score_window_size
-        window_threshold = context.validation_params.low_score_window_avg_threshold
-        if len(scores) >= window_size:
-            for i in range(len(scores) - window_size + 1):
-                window = scores[i:i + window_size]
-                avg_score = sum(window) / len(window)
-                if avg_score < window_threshold:
-                    window_words = " ".join([w.word for w in result.words[i:i + window_size]])
-                    return ValidationResult(
-                        is_ok=False,
-                        reason=f"Sequence of words '{window_words}' has low avg score ({avg_score:.2f})"
-                    )
+            return ValidationResult(is_ok=False, reason=reason)
 
-        return ValidationResult(is_ok=True)
+    def _perform_validation(self, word_segments: List[WordSegment], settings: AlignmentValidationOptions) -> List[ValidationIssue]:
+        """Orchestrates the validation process and returns a list of unique issues."""
+        severity_maps = sorted(
+            [
+                (3, settings.critical_thresholds),
+                (2, settings.poor_thresholds),
+                (1, settings.weak_thresholds)
+            ],
+            key=lambda x: x[0],
+            reverse=True
+        )
+
+        augmented_segments = self._augment_segments(word_segments, settings, severity_maps)
+        if not augmented_segments:
+            return []
+
+        issues = self._run_single_pass_check(augmented_segments, settings)
+        
+        unique_issues = sorted(list(set(issues)), key=lambda x: x.index)
+        return unique_issues
+
+    def _augment_segments(self, word_segments: List[WordSegment], settings: AlignmentValidationOptions, severity_maps: list) -> list:
+        """Performs pre-computation for all words in a single pass."""
+        augmented = []
+        for i, seg in enumerate(word_segments):
+            # Use a robust regex to strip all leading/trailing non-alphanumeric characters.
+            clean_word = re.sub(r'^\W+|\W+$', '', seg.word.lower())
+
+            if not clean_word:
+                continue
+
+            score = seg.score if seg.score is not None else 1.0
+            weight = self._calculate_word_weight(clean_word, settings.weighted_window)
+            # Check if the cleaned token is a number. Numbers have different alignment
+            # characteristics, and their string length is not a good heuristic for
+            # spoken duration. We treat them as "Good" by default to prevent false
+            # failures on years, quantities, etc., especially if normalization is off.
+            if clean_word.isnumeric():
+                severity = 0
+            else:
+                # For regular words, apply the standard length-based severity check.
+                severity = self._get_severity_for_word(clean_word, score, severity_maps)
+
+            augmented.append({
+                'original_word': seg.word,
+                'clean_word': clean_word,
+                'score': score,
+                'index': i,
+                'severity': severity,
+                'weight': weight
+            })
+        return augmented
+    
+    def _get_severity_for_word(self, word: str, score: float, severity_maps: list) -> int:
+        """Determines the severity level (3, 2, 1, or 0) for a word given its score."""
+        word_len = len(word)
+        for severity_level, length_map in severity_maps:
+            if not length_map:
+                continue
+                
+            # Find the largest key in the map that is less than or equal to the word's length.
+            applicable_len_key = max(
+                [k for k in length_map if word_len >= k],
+                default=min(length_map.keys())
+            )
+            threshold = length_map[applicable_len_key]
+
+            if score < threshold:
+                return severity_level
+        return 0
+
+    def _calculate_word_weight(self, word: str, conf: WeightedWindow) -> float:
+        """Calculates the importance of a word for windowed averaging."""
+        return conf.base_weight + (len(word) * conf.per_char_weight)
+
+    def _run_single_pass_check(self, segments: list, settings: AlignmentValidationOptions) -> List[ValidationIssue]:
+        issues = []
+        consecutive_poor_count = 0
+        consecutive_weak_count = 0
+        
+        conf_win = settings.weighted_window
+        window = deque(maxlen=conf_win.size)
+
+        for i, seg in enumerate(segments):
+            seg_severity = seg['severity']
+
+            # 1. Immediate Fail Check
+            if seg_severity >= settings.immediate_fail_severity:
+                issues.append(ValidationIssue(type="ImmediateFail", word=seg['original_word'], index=i, score=seg['score'], details=f"Score of {seg['score']:.2f} triggered a critical failure (Severity {seg_severity})."))
+                return issues
+
+            # 2. Consecutive Failures Check
+            if seg_severity >= 2: # Poor or Critical
+                consecutive_poor_count += 1
+                consecutive_weak_count += 1
+            elif seg_severity >= 1: # Weak only
+                consecutive_poor_count = 0
+                consecutive_weak_count += 1
+            else: # Good
+                consecutive_poor_count = 0
+                consecutive_weak_count = 0
+            
+            if settings.consecutive_poor_limit is not None and consecutive_poor_count >= settings.consecutive_poor_limit:
+                issues.append(ValidationIssue(type="ConsecutiveFailure", word=seg['original_word'], index=i, score=seg['score'], details=f"Reached {settings.consecutive_poor_limit} consecutive words with 'Poor' or higher severity."))
+                consecutive_poor_count = 0
+
+            if settings.consecutive_weak_limit is not None and consecutive_weak_count >= settings.consecutive_weak_limit:
+                issues.append(ValidationIssue(type="ConsecutiveFailure", word=seg['original_word'], index=i, score=seg['score'], details=f"Reached {settings.consecutive_weak_limit} consecutive words with 'Weak' or higher severity."))
+                consecutive_weak_count = 0
+
+            # 3. Window-based Checks
+            window.append(seg)
+            if len(window) == conf_win.size:
+                center_item_global_index = i - (conf_win.size // 2)
+                if settings.dip_detection.enabled:
+                    issues.extend(self._check_dip_in_window(window, center_item_global_index, settings.dip_detection))
+                if settings.weighted_window.enabled:
+                    issues.extend(self._check_average_in_window(window, center_item_global_index, settings.weighted_window))
+        return issues
+
+    def _check_dip_in_window(self, window: deque, center_idx: int, conf: DipDetection) -> List[ValidationIssue]:
+        center_item = window[len(window) // 2]
+        if len(center_item['clean_word']) < conf.min_word_len:
+            return []
+        neighbor_scores = [item['score'] for idx, item in enumerate(window) if idx != len(window) // 2]
+        if not neighbor_scores:
+            return []
+        avg_neighbor_score = sum(neighbor_scores) / len(neighbor_scores)
+        if center_item['score'] < (avg_neighbor_score - conf.dip_threshold):
+            return [ValidationIssue(type="DipDetection", word=center_item['original_word'], index=center_idx, score=center_item['score'], details=f"Score of {center_item['score']:.2f} is a significant dip from neighbor average of {avg_neighbor_score:.2f}.")]
+        return []
+
+    def _check_average_in_window(self, window: deque, center_idx: int, conf: WeightedWindow) -> List[ValidationIssue]:
+        total_score = sum(item['score'] * item['weight'] for item in window)
+        total_weight = sum(item['weight'] for item in window)
+        if total_weight == 0:
+            return []
+        weighted_avg = total_score / total_weight
+        if weighted_avg < conf.average_score_threshold:
+            center_item = window[len(window) // 2]
+            return [ValidationIssue(type="WindowAverage", word=center_item['original_word'], index=center_idx, score=center_item['score'], details=f"Window's weighted average score of {weighted_avg:.2f} is below threshold of {conf.average_score_threshold}.")]
+        return []
 
 # STAGE 4
 class ClippingValidator(AbstractValidator):

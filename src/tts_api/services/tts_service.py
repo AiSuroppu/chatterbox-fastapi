@@ -260,7 +260,7 @@ def generate_speech_from_request(
             ))
 
     # This flag is passed to the analyzer to determine if alignment is needed.
-    alignment_needed = req.validation.enable_alignment_validation or req.return_timestamps
+    alignment_needed = req.validation.alignment.enabled or req.return_timestamps
 
     # Phase 2: Multi-Pass Processing Loop
     for attempt in range(req.max_retries + 1):

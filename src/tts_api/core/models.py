@@ -1,8 +1,28 @@
 from enum import Enum
 from pydantic import BaseModel, Field
-from typing import List, Union, Optional
+from typing import List, Union, Optional, Dict
 
 from tts_api.services.alignment.interface import WordSegment
+
+# --- Data Models for Structured Validation Reporting ---
+
+class ValidationIssue(BaseModel):
+    """Represents a single, specific validation failure."""
+    type: str
+    word: str
+    index: int
+    score: float
+    details: str
+
+    def __hash__(self):
+        return hash((self.type, self.word, self.index, self.score, self.details))
+
+    def __eq__(self, other):
+        if not isinstance(other, ValidationIssue):
+            return NotImplemented
+        return (self.type, self.word, self.index, self.score, self.details) == \
+               (other.type, other.word, other.index, other.score, other.details)
+
 
 # --- Generic Request Component Models ---
 
@@ -59,6 +79,42 @@ class TextProcessingOptions(BaseModel):
     ideal_chunk_length: int = Field(300, ge=50, le=1000, description="The target character length for chunks. Used by 'balanced' strategy.")
     max_chunk_length: int = Field(500, ge=50, le=1000, description="The absolute maximum character length for any text chunk.")
 
+
+# --- Alignment Validation Component Models ---
+
+class DipDetection(BaseModel):
+    enabled: bool = Field(True)
+    dip_threshold: float = Field(0.4, ge=0.0, le=1.0)
+    min_word_len: int = Field(4, ge=1)
+
+class WeightedWindow(BaseModel):
+    enabled: bool = Field(True)
+    size: int = Field(5, ge=3, le=15)
+    average_score_threshold: float = Field(0.55, ge=0.0, le=1.0)
+    base_weight: float = Field(1.0, ge=0.0)
+    per_char_weight: float = Field(0.15, ge=0.0)
+
+class AlignmentValidationOptions(BaseModel):
+    """Hierarchical severity-based validation for forced alignment."""
+    enabled: bool = Field(False, description="Master switch for this validation system.")
+    
+    # Severity Thresholds
+    critical_thresholds: Dict[int, float] = Field(default={1: 0.15, 4: 0.20})
+    poor_thresholds: Dict[int, float] = Field(default={1: 0.25, 2: 0.35, 4: 0.45, 8: 0.55})
+    weak_thresholds: Dict[int, float] = Field(default={1: 0.35, 2: 0.45, 4: 0.55, 8: 0.65})
+    
+    # Failure Conditions
+    immediate_fail_severity: int = Field(3, ge=1, le=3, description="Fail if any word meets this severity (3=Critical).")
+    consecutive_poor_limit: Optional[int] = Field(
+        3, ge=2, description="Fail if N consecutive words have a 'Poor' (2) or 'Critical' (3) severity. Set to null to disable.")
+    consecutive_weak_limit: Optional[int] = Field(
+        5, ge=2, description="Fail if N consecutive words have a 'Weak' (1) or higher severity. Set to null to disable.")
+    
+    # Contextual Checks
+    dip_detection: DipDetection = Field(default_factory=DipDetection)
+    weighted_window: WeightedWindow = Field(default_factory=WeightedWindow)
+
+
 class ValidationOptions(BaseModel):
     """Parameters for post-generation validation and retries."""
     max_silence_dbfs: Optional[float] = Field(
@@ -93,17 +149,9 @@ class ValidationOptions(BaseModel):
             "When a word is identified as low-complexity (e.g., 'Ahhhhh'), its syllable count for the max duration budget is estimated as (word_length / this_value). This provides a scalable budget for onomatopoeia and other expressive sounds."))
     low_complexity_max_duration_per_syllable: float = Field(
         0.600, ge=0.0, le=10.0, description="The relaxed maximum speech duration per syllable for words identified as low-complexity (e.g., onomatopoeia) when word-level analysis is enabled.")
+    
     # --- Alignment Validation Settings ---
-    enable_alignment_validation: bool = Field(
-        False, description=(
-            "Master switch to enable WhisperX-based alignment validation. "
-            "If true, this replaces the VAD speech ratio for scoring and adds new validation steps."))
-    min_word_alignment_score: float = Field(
-        0.5, ge=0.0, le=1.0, description="Fail if any word has an alignment score below this threshold. A lower value is more lenient.")
-    low_score_window_size: int = Field(
-        3, ge=2, le=10, description="The number of consecutive words in a sliding window to check for persistently low scores.")
-    low_score_window_avg_threshold: float = Field(
-        0.6, ge=0.0, le=1.0, description="Fail if the average alignment score of words within the sliding window falls below this threshold.")
+    alignment: AlignmentValidationOptions = Field(default_factory=AlignmentValidationOptions, description="Configuration for the hierarchical, severity-based alignment validator.")
     
     # Audio quality validation
     max_clipping_percentage: Optional[float] = Field(
