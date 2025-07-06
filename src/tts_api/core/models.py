@@ -83,36 +83,57 @@ class TextProcessingOptions(BaseModel):
 # --- Alignment Validation Component Models ---
 
 class DipDetection(BaseModel):
-    enabled: bool = Field(True)
-    dip_threshold: float = Field(0.4, ge=0.0, le=1.0)
-    min_word_len: int = Field(4, ge=1)
+    """Settings for detecting a single word with an anomalously low score compared to its neighbors."""
+    enabled: bool = Field(True, description="Enable the score dip detection check.")
+    dip_threshold: float = Field(0.4, ge=0.0, le=1.0, description="A word's score must be lower than its neighbors' average by at least this amount to be flagged as a dip.")
+    min_word_len: int = Field(4, ge=1, description="The word must have at least this many characters to be considered for dip detection, preventing flags on short, common words.")
 
 class WeightedWindow(BaseModel):
-    enabled: bool = Field(True)
-    size: int = Field(5, ge=3, le=15)
-    average_score_threshold: float = Field(0.55, ge=0.0, le=1.0)
-    base_weight: float = Field(1.0, ge=0.0)
-    per_char_weight: float = Field(0.15, ge=0.0)
+    """Settings for a weighted moving average score check across a window of words."""
+    enabled: bool = Field(True, description="Enable the weighted window average check.")
+    size: int = Field(5, ge=3, le=15, description="The number of words in the sliding window.")
+    average_score_threshold: float = Field(0.55, ge=0.0, le=1.0, description="Fail if the weighted average score of the words in the window falls below this threshold.")
+    base_weight: float = Field(1.0, ge=0.0, description="The base weight assigned to every word in the window.")
+    per_char_weight: float = Field(0.15, ge=0.0, description="Additional weight added for each character in a word, giving longer words more importance in the average.")
+
+class GapHallucinationCheck(BaseModel):
+    """Settings for detecting speech in gaps between aligned words."""
+    enabled: bool = Field(True, description="Enable checking for speech (hallucinations) in the silent gaps between aligned words.")
+    min_gap_duration_ms: int = Field(150, ge=0, description="Do not check gaps shorter than this duration (ms). Prevents false positives in tight word spacing.")
+    max_speech_in_gap_ms: int = Field(250, ge=0, description="Fail validation if more than this duration (ms) of VAD-detected speech is found in a single gap.")
 
 class AlignmentValidationOptions(BaseModel):
     """Hierarchical severity-based validation for forced alignment."""
     enabled: bool = Field(False, description="Master switch for this validation system.")
     
     # Severity Thresholds
-    critical_thresholds: Dict[int, float] = Field(default={1: 0.15, 4: 0.20})
-    poor_thresholds: Dict[int, float] = Field(default={1: 0.25, 2: 0.35, 4: 0.45, 8: 0.55})
-    weak_thresholds: Dict[int, float] = Field(default={1: 0.35, 2: 0.45, 4: 0.55, 8: 0.65})
+    critical_thresholds: Dict[int, float] = Field(
+        default={1: 0.15, 4: 0.20},
+        description="Map of (min_word_length: score_threshold) for 'Critical' severity. A word's score below this threshold marks it as a critical failure.")
+    poor_thresholds: Dict[int, float] = Field(
+        default={1: 0.25, 2: 0.35, 4: 0.45, 8: 0.55},
+        description="Map of (min_word_length: score_threshold) for 'Poor' severity.")
+    weak_thresholds: Dict[int, float] = Field(
+        default={1: 0.35, 2: 0.45, 4: 0.55, 8: 0.65},
+        description="Map of (min_word_length: score_threshold) for 'Weak' severity.")
     
     # Failure Conditions
-    immediate_fail_severity: int = Field(3, ge=1, le=3, description="Fail if any word meets this severity (3=Critical).")
+    immediate_fail_severity: int = Field(3, ge=1, le=3, description="Fail immediately if any single word reaches this severity level (3=Critical, 2=Poor, 1=Weak).")
     consecutive_poor_limit: Optional[int] = Field(
         3, ge=2, description="Fail if N consecutive words have a 'Poor' (2) or 'Critical' (3) severity. Set to null to disable.")
     consecutive_weak_limit: Optional[int] = Field(
         5, ge=2, description="Fail if N consecutive words have a 'Weak' (1) or higher severity. Set to null to disable.")
     
     # Contextual Checks
-    dip_detection: DipDetection = Field(default_factory=DipDetection)
-    weighted_window: WeightedWindow = Field(default_factory=WeightedWindow)
+    dip_detection: DipDetection = Field(
+        default_factory=DipDetection,
+        description="Configuration for detecting a single low-quality word surrounded by high-quality words.")
+    weighted_window: WeightedWindow = Field(
+        default_factory=WeightedWindow,
+        description="Configuration for checking the average quality over a sliding window of words.")
+    gap_hallucination_check: GapHallucinationCheck = Field(
+        default_factory=GapHallucinationCheck, 
+        description="Configuration for detecting hallucinated speech in gaps between words.")
 
 
 class ValidationOptions(BaseModel):

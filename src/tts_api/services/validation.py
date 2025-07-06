@@ -421,6 +421,69 @@ class AlignmentValidator(AbstractValidator):
             return [ValidationIssue(type="WindowAverage", word=center_item['original_word'], index=center_idx, score=center_item['score'], details=f"Window's weighted average score of {weighted_avg:.2f} is below threshold of {conf.average_score_threshold}.")]
         return []
 
+class GapHallucinationValidator(AbstractValidator):
+    """
+    Checks for unexpected speech in the gaps between aligned words.
+    This is effective at detecting word-level hallucinations.
+    """
+    def is_valid(self, context: ValidationContext) -> ValidationResult:
+        settings = context.validation_params.alignment.gap_hallucination_check
+        
+        # 1. Guard clauses for when this check is disabled or not applicable
+        if not context.validation_params.alignment.enabled or not settings.enabled:
+            return ValidationResult(is_ok=True)
+            
+        if not context.alignment_result or len(context.alignment_result.words) < 2:
+            # Cannot check gaps if there are fewer than 2 words.
+            return ValidationResult(is_ok=True)
+            
+        if not context.initial_speech_segments:
+            # No speech detected by VAD at all, so no hallucinations are possible.
+            return ValidationResult(is_ok=True)
+
+        word_segments = context.alignment_result.words
+        vad_segments = context.initial_speech_segments # These are in samples
+        sample_rate = context.sample_rate
+
+        # 2. Iterate through the gaps between words
+        for i in range(len(word_segments) - 1):
+            word_a = word_segments[i]
+            word_b = word_segments[i+1]
+
+            if word_a.end is None or word_b.start is None or word_a.end >= word_b.start:
+                continue
+
+            gap_duration_ms = (word_b.start - word_a.end) * 1000
+            if gap_duration_ms < settings.min_gap_duration_ms:
+                continue
+
+            gap_start_samples = int(word_a.end * sample_rate)
+            gap_end_samples = int(word_b.start * sample_rate)
+            
+            speech_in_gap_samples = 0
+            
+            # 3. Check for VAD segment overlap within the current gap
+            for vad_seg in vad_segments:
+                # Calculate the intersection of the VAD segment and the gap
+                overlap_start = max(vad_seg['start'], gap_start_samples)
+                overlap_end = min(vad_seg['end'], gap_end_samples)
+                
+                if overlap_end > overlap_start:
+                    speech_in_gap_samples += (overlap_end - overlap_start)
+
+            speech_in_gap_ms = (speech_in_gap_samples / sample_rate) * 1000
+
+            # 4. Fail if the speech duration exceeds the threshold
+            if speech_in_gap_ms > settings.max_speech_in_gap_ms:
+                reason = (
+                    f"Hallucination detected: {speech_in_gap_ms:.0f}ms of speech found in gap "
+                    f"between '{word_a.word}' and '{word_b.word}' "
+                    f"(limit: {settings.max_speech_in_gap_ms}ms)."
+                )
+                return ValidationResult(is_ok=False, reason=reason)
+                
+        return ValidationResult(is_ok=True)
+
 # STAGE 4
 class ClippingValidator(AbstractValidator):
     def is_valid(self, context: ValidationContext) -> ValidationResult:
@@ -529,7 +592,7 @@ class SpectralCentroidValidator(AbstractValidator):
 
 PRE_FILTER_VALIDATORS = [SilenceThresholdValidator()]
 ALL_FILTERS = [LowEnergySegmentFilter()]
-POST_FILTER_VALIDATORS = [VoicedDurationValidator(), MaxContiguousSilenceValidator(), AlignmentValidator()]
+POST_FILTER_VALIDATORS = [VoicedDurationValidator(), MaxContiguousSilenceValidator(), AlignmentValidator(), GapHallucinationValidator()]
 QUALITY_VALIDATORS = [ClippingValidator(), SpectralCentroidValidator()]
 
 def run_validation_pipeline(
