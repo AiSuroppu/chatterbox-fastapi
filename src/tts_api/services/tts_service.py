@@ -136,11 +136,30 @@ def _assemble_final_waveform(
             current_duration_s += post_processing_opts.lead_in_silence_ms / 1000.0
 
     for i, segment in enumerate(final_segments):
+        is_first_segment = (i == 0)
+        is_last_segment = (i == len(final_segments) - 1)
+
+        # Add inter-segment silence BEFORE processing the current segment's audio.
+        if not is_first_segment:
+            # The pause is determined by the boundary type of the PREVIOUS segment.
+            prev_segment_info = input_segment_info[i-1]
+            pause_ms = post_processing_opts.inter_segment_silence_fallback_ms
+            if prev_segment_info.boundary_type == BoundaryType.PARAGRAPH:
+                pause_ms = post_processing_opts.inter_segment_silence_paragraph_ms
+            elif prev_segment_info.boundary_type == BoundaryType.SENTENCE:
+                pause_ms = post_processing_opts.inter_segment_silence_sentence_ms
+
+            if pause_ms > 0:
+                silence_samples = int((pause_ms / 1000) * sample_rate)
+                final_audio_parts.append(torch.zeros((num_channels, silence_samples), dtype=dtype, device=device))
+                current_duration_s += pause_ms / 1000.0
+        
+        # At this point, `current_duration_s` is the correct starting offset for the current segment.
+
+        # Process the current audio segment (trimming logic)
         waveform_to_process = segment.waveform
         vad_timestamps = segment.analysis.vad_speech_timestamps
         segment_words = segment.analysis.alignment_result.words if segment.analysis.alignment_result else []
-        is_first_segment = (i == 0)
-        is_last_segment = (i == len(final_segments) - 1)
         
         # Speech boundary calculation
         # 1. Get boundaries from VAD (baseline)
@@ -155,14 +174,10 @@ def _assemble_final_waveform(
             word_starts_s = [w.start for w in segment_words if w.start is not None]
             word_ends_s = [w.end for w in segment_words if w.end is not None]
             if word_starts_s:
-                alignment_start_s = min(word_starts_s)
-                alignment_start_sample = int(alignment_start_s * sample_rate)
-                # Update effective start: choose the one that cuts less silence (earlier time)
+                alignment_start_sample = int(min(word_starts_s) * sample_rate)
                 effective_speech_start = min(vad_start_sample, alignment_start_sample)
             if word_ends_s:
-                alignment_end_s = max(word_ends_s)
-                alignment_end_sample = int(alignment_end_s * sample_rate)
-                # Update effective end: choose the one that cuts less silence (later time)
+                alignment_end_sample = int(max(word_ends_s) * sample_rate)
                 effective_speech_end = max(vad_end_sample, alignment_end_sample)
 
         # Determine the slice to take from the original waveform using the effective boundaries
@@ -184,39 +199,24 @@ def _assemble_final_waveform(
 
         # Apply the calculated slice
         if slice_start < slice_end:
-            waveform_to_process = waveform_to_process[..., slice_start:slice_end]
+            trimmed_waveform = waveform_to_process[..., slice_start:slice_end]
         else: # Handle cases where trimming results in an empty waveform
-            waveform_to_process = torch.zeros((num_channels, 0), dtype=dtype, device=device)
+            trimmed_waveform = torch.zeros((num_channels, 0), dtype=dtype, device=device)
 
-        # Calculate word timestamp offsets based on how much was trimmed from the start
+        # Calculate timestamps BEFORE appending the audio and updating the duration.
         timestamp_offset_s = slice_start / sample_rate
-
-        final_audio_parts.append(waveform_to_process)
-        segment_duration_s = waveform_to_process.shape[-1] / sample_rate
-        
         for word in segment_words:
             if word.start is not None and word.end is not None:
                 offset_word = word.model_copy()
-                # Adjust for trimmed silence at the start of THIS chunk, then add global offset
+                # Use the correct `current_duration_s` which represents the total length BEFORE this chunk's audio.
                 offset_word.start = max(0, word.start - timestamp_offset_s) + current_duration_s
                 offset_word.end = max(0, word.end - timestamp_offset_s) + current_duration_s
                 final_word_segments.append(offset_word)
 
-        current_duration_s += segment_duration_s
-
-        # Add inter-segment silence if this is not the last segment
-        if not is_last_segment:
-            segment_info = input_segment_info[i]
-            pause_ms = post_processing_opts.inter_segment_silence_fallback_ms
-            if segment_info.boundary_type == BoundaryType.PARAGRAPH:
-                pause_ms = post_processing_opts.inter_segment_silence_paragraph_ms
-            elif segment_info.boundary_type == BoundaryType.SENTENCE:
-                pause_ms = post_processing_opts.inter_segment_silence_sentence_ms
-
-            if pause_ms > 0:
-                silence_samples = int((pause_ms / 1000) * sample_rate)
-                final_audio_parts.append(torch.zeros((num_channels, silence_samples), dtype=dtype, device=device))
-                current_duration_s += pause_ms / 1000.0
+        # Now append the processed audio chunk.
+        final_audio_parts.append(trimmed_waveform)
+        # Finally, update the running total with the duration of the audio we just appended.
+        current_duration_s += trimmed_waveform.shape[-1] / sample_rate
 
     # Handle lead-out silence for the very last segment
     if post_processing_opts.lead_out_silence_ms is not None:
