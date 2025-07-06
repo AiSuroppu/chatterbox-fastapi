@@ -142,22 +142,54 @@ def _assemble_final_waveform(
         is_first_segment = (i == 0)
         is_last_segment = (i == len(final_segments) - 1)
         
-        # If user is controlling lead-in/out, we trim the VAD-detected silence from the edges.
-        # Otherwise, if trim_segment_silence is true, we still trim it.
-        # If trim_segment_silence is false, we keep the original waveform unless a lead-in/out override forces a trim.
-        if is_first_segment and post_processing_opts.lead_in_silence_ms is not None:
-            if vad_timestamps: waveform_to_process = waveform_to_process[..., vad_timestamps[0]['start']:]
-        
-        if is_last_segment and post_processing_opts.lead_out_silence_ms is not None:
-            if vad_timestamps: waveform_to_process = waveform_to_process[..., :vad_timestamps[-1]['end']]
+        # Speech boundary calculation
+        # 1. Get boundaries from VAD (baseline)
+        vad_start_sample = vad_timestamps[0]['start'] if vad_timestamps else 0
+        vad_end_sample = vad_timestamps[-1]['end'] if vad_timestamps else waveform_to_process.shape[-1]
+        # 2. Initialize effective boundaries with VAD results
+        effective_speech_start = vad_start_sample
+        effective_speech_end = vad_end_sample
+        # 3. Get boundaries from alignment service, if available
+        if segment_words:
+            # Find the earliest start and latest end time from all words
+            word_starts_s = [w.start for w in segment_words if w.start is not None]
+            word_ends_s = [w.end for w in segment_words if w.end is not None]
+            if word_starts_s:
+                alignment_start_s = min(word_starts_s)
+                alignment_start_sample = int(alignment_start_s * sample_rate)
+                # Update effective start: choose the one that cuts less silence (earlier time)
+                effective_speech_start = min(vad_start_sample, alignment_start_sample)
+            if word_ends_s:
+                alignment_end_s = max(word_ends_s)
+                alignment_end_sample = int(alignment_end_s * sample_rate)
+                # Update effective end: choose the one that cuts less silence (later time)
+                effective_speech_end = max(vad_end_sample, alignment_end_sample)
 
+        # Determine the slice to take from the original waveform using the effective boundaries
+        slice_start = 0
+        slice_end = waveform_to_process.shape[-1]
+
+        # Handle explicit user overrides for lead-in/out first
+        if is_first_segment and post_processing_opts.lead_in_silence_ms is not None:
+            slice_start = effective_speech_start
+        if is_last_segment and post_processing_opts.lead_out_silence_ms is not None:
+            slice_end = effective_speech_end
+
+        # Apply general inter-segment trimming if enabled and not overridden
         if post_processing_opts.trim_segment_silence:
-            if is_first_segment and not is_last_segment:
-                if vad_timestamps: waveform_to_process = waveform_to_process[..., :vad_timestamps[-1]['end']]
-            elif is_last_segment and not is_first_segment:
-                if vad_timestamps: waveform_to_process = waveform_to_process[..., vad_timestamps[0]['start']:]
-            elif not is_first_segment and not is_last_segment:
-                waveform_to_process = _trim_waveform_with_vad(segment)
+            if not is_first_segment: # Trim start of any non-first segment
+                slice_start = effective_speech_start
+            if not is_last_segment: # Trim end of any non-last segment
+                slice_end = effective_speech_end
+
+        # Apply the calculated slice
+        if slice_start < slice_end:
+            waveform_to_process = waveform_to_process[..., slice_start:slice_end]
+        else: # Handle cases where trimming results in an empty waveform
+            waveform_to_process = torch.zeros((num_channels, 0), dtype=dtype, device=device)
+
+        # Calculate word timestamp offsets based on how much was trimmed from the start
+        timestamp_offset_s = slice_start / sample_rate
 
         final_audio_parts.append(waveform_to_process)
         segment_duration_s = waveform_to_process.shape[-1] / sample_rate
@@ -165,8 +197,9 @@ def _assemble_final_waveform(
         for word in segment_words:
             if word.start is not None and word.end is not None:
                 offset_word = word.model_copy()
-                offset_word.start += current_duration_s
-                offset_word.end += current_duration_s
+                # Adjust for trimmed silence at the start of THIS chunk, then add global offset
+                offset_word.start = max(0, word.start - timestamp_offset_s) + current_duration_s
+                offset_word.end = max(0, word.end - timestamp_offset_s) + current_duration_s
                 final_word_segments.append(offset_word)
 
         current_duration_s += segment_duration_s
