@@ -56,6 +56,10 @@ class GenerationJob:
     attempt_count: int = 0
     current_seed: int = 0
     
+    # Temporary fields for batched processing within a single attempt
+    waveform: Optional[torch.Tensor] = None
+    analysis: Optional[AudioAnalysis] = None
+    
     # Results
     result: Optional[GeneratedSegment] = None
     last_failure_reason: Optional[str] = None
@@ -257,6 +261,8 @@ def generate_speech_from_request(
             for job in jobs_to_process:
                 job.current_seed = candidate_retry_seeds[job.candidate_idx]
         
+        # Batched generation phase
+        logging.debug(f"Starting generation phase for {len(jobs_to_process)} jobs.")
         jobs_by_seed = defaultdict(list)
         for job in jobs_to_process:
             jobs_by_seed[job.current_seed].append(job)
@@ -271,58 +277,77 @@ def generate_speech_from_request(
                 engine_params,
                 **generation_kwargs
             )
+            # Store waveforms temporarily on the job object
+            for i, job in enumerate(job_group):
+                job.waveform = generated_waveforms[i]
 
-            # Analysis
-            analysis_jobs = [
-                AnalysisJob(waveform=wf, sample_rate=engine.sample_rate, text=job.text)
-                for wf, job in zip(generated_waveforms, job_group)
-            ]
+        # Batched analysis phase
+        logging.debug("Starting batched analysis for all generated waveforms.")
+        # Create a list of jobs that actually have a waveform to be analyzed
+        analysis_job_inputs = [
+            AnalysisJob(waveform=job.waveform, sample_rate=engine.sample_rate, text=job.text)
+            for job in jobs_to_process if job.waveform is not None
+        ]
+        # Keep a parallel list of the original job objects to map results back
+        jobs_with_waveforms = [job for job in jobs_to_process if job.waveform is not None]
+
+        if analysis_job_inputs:
             analysis_results = analyze_batch(
-                jobs=analysis_jobs,
+                jobs=analysis_job_inputs,
                 post_processing_opts=req.post_processing,
                 alignment_needed=alignment_needed,
                 text_language=req.text_processing.text_language,
             )
+            # Store analysis results temporarily on the job object
+            for i, job in enumerate(jobs_with_waveforms):
+                job.analysis = analysis_results[i]
 
-            # Validation and Scoring
-            for i, job in enumerate(job_group):
-                job.attempt_count += 1
-                waveform = generated_waveforms[i]
-                analysis_data = analysis_results[i]
+        # Batched validation and scoring phase
+        logging.debug("Starting validation and scoring phase.")
+        for job in jobs_to_process:
+            job.attempt_count += 1
 
-                if waveform is None or waveform.numel() == 0 or analysis_data is None:
-                    job.last_failure_reason = "Engine returned empty/None output or analysis failed."
-                    continue
+            if job.waveform is None or job.waveform.numel() == 0 or job.analysis is None:
+                job.last_failure_reason = "Engine returned empty/None output or analysis failed."
+                continue
 
-                validation_result = run_validation_pipeline(
-                    waveform=waveform,
-                    sample_rate=engine.sample_rate,
-                    text_chunk=job.text,
-                    validation_params=req.validation,
-                    post_processing_params=req.post_processing,
-                    language=req.text_processing.text_language,
-                    analysis_data=analysis_data
-                )
-                
-                if validation_result.is_ok:
-                    job.status = JobStatus.SUCCESS
-                    # SCORING: Use the pre-computed analysis data.
-                    if alignment_needed:
-                        if analysis_data.alignment_result and analysis_data.alignment_result.words:
-                            word_scores = [w.score for w in analysis_data.alignment_result.words if w.score is not None]
-                            score = sum(word_scores) / len(word_scores) if word_scores else 0.0
-                        else:
-                            score = 0.0
-                            logging.warning(f"Alignment validation passed but no alignment data found for scoring. Defaulting score to 0.")
+            validation_result = run_validation_pipeline(
+                waveform=job.waveform,
+                sample_rate=engine.sample_rate,
+                text_chunk=job.text,
+                validation_params=req.validation,
+                post_processing_params=req.post_processing,
+                language=req.text_processing.text_language,
+                analysis_data=job.analysis
+            )
+            
+            if validation_result.is_ok:
+                job.status = JobStatus.SUCCESS
+                # SCORING: Use the pre-computed analysis data.
+                if alignment_needed:
+                    if job.analysis.alignment_result and job.analysis.alignment_result.words:
+                        word_scores = [w.score for w in job.analysis.alignment_result.words if w.score is not None]
+                        score = sum(word_scores) / len(word_scores) if word_scores else 0.0
                     else:
-                        score = calculate_speech_ratio_from_timestamps(analysis_data.vad_speech_timestamps, waveform.shape[-1])
-                    
-                    job.result = GeneratedSegment(waveform=waveform, sample_rate=engine.sample_rate, analysis=analysis_data, score=score)
-                    job.last_failure_reason = None
+                        score = 0.0
+                        logging.warning(f"Alignment validation passed but no alignment data found for scoring. Defaulting score to 0.")
                 else:
-                    job.last_failure_reason = validation_result.reason
-                    if job.attempt_count <= req.max_retries:
-                        logging.warning(f"Validation failed for chunk (seg={job.segment_idx}, cand={job.candidate_idx}, att={job.attempt_count}, seed={job.current_seed}): {validation_result.reason}. Will retry.")
+                    score = calculate_speech_ratio_from_timestamps(job.analysis.vad_speech_timestamps, job.waveform.shape[-1])
+                
+                job.result = GeneratedSegment(waveform=job.waveform, sample_rate=engine.sample_rate, analysis=job.analysis, score=score)
+                job.last_failure_reason = None
+            else:
+                job.last_failure_reason = validation_result.reason
+                if job.attempt_count <= req.max_retries:
+                    logging.warning(f"Validation failed for chunk (seg={job.segment_idx}, cand={job.candidate_idx}, att={job.attempt_count}, seed={job.current_seed}): {validation_result.reason}. Will retry.")
+
+        # Cleanup phase
+        for job in jobs_to_process:
+            if job.status == JobStatus.PENDING and job.attempt_count > req.max_retries:
+                job.status = JobStatus.FAILED_FINAL
+            # ALWAYS clear the temporary fields for every job processed in this attempt.
+            job.waveform = None
+            job.analysis = None
 
     # Phase 3: Finalization & Assembly
     final_failures = sum(1 for job in all_jobs if job.status != JobStatus.SUCCESS)
