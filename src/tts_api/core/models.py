@@ -252,6 +252,9 @@ class ChatterboxParams(BaseModel):
     exaggeration: float = Field(0.5, ge=0.0, le=2.0, description="Emotion exaggeration.")
     temperature: float = Field(0.8, ge=0.01, le=5.0, description="Generation temperature.")
     cfg_weight: float = Field(0.5, ge=0.0, le=1.0, description="CFG Weight.")
+    repetition_penalty: float = Field(1.2, ge=1.0, le=3.0, description="Penalty for repeating tokens. Higher values reduce repetition.")
+    min_p: float = Field(0.05, ge=0.0, le=1.0, description="Minimum probability for nucleus sampling. A smaller value can improve output diversity but may introduce artifacts.")
+    top_p: float = Field(1.0, ge=0.0, le=1.0, description="Top-P sampling threshold. If set to < 1.0, only the most probable tokens with a cumulative probability of `top_p` are considered.")
     disable_watermark: bool = Field(True, description="Disable Chatterbox's audio watermark.")
     use_analyzer: bool = Field(False, description="Enable the alignment analyzer for improved quality and robustness. May fail on some inputs.")
     voice_cache_token: Optional[str] = Field(
