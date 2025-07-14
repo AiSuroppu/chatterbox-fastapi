@@ -275,12 +275,15 @@ def _prepare_and_segment_sentences(text: str, options: TextProcessingOptions) ->
     segmenter = get_segmenter(options.text_language)
     sentences = segmenter.segment(text)
 
-    # Step 5: Text Normalization (NeMo) for numbers, dates, etc.
+    # Step 5. Apply local, intra-sentence stylistic normalizations.
+    sentences = [_normalize_local_stylistic_patterns(sent, options) for sent in sentences]
+
+    # Step 6: Text Normalization (NeMo) for numbers, dates, etc.
     if options.use_nemo_normalizer:
         normalizer = get_normalizer(options.text_language)
         sentences = normalizer.normalize_list(sentences)
     
-    # Step 5.5: Tokenize Paragraph Breaks.
+    # Step 7: Tokenize Paragraph Breaks.
     tokenized_sentences = []
     for sent in sentences:
         # If a sentence contains a paragraph break, split it and insert our token.
@@ -298,7 +301,7 @@ def _prepare_and_segment_sentences(text: str, options: TextProcessingOptions) ->
             # If there's no break, add the sentence as is.
             tokenized_sentences.append(sent)
 
-    # Step 6: Final per-sentence processing loop.
+    # Step 8: Final per-sentence processing loop.
     final_sentence_units = []
     for sent in tokenized_sentences:
         # If the sentence is our special token, pass it through directly.
@@ -307,14 +310,12 @@ def _prepare_and_segment_sentences(text: str, options: TextProcessingOptions) ->
             continue
         # Otherwise, it's a sentence that needs final normalization.
 
-        # 6a. Normalize internal spacing and ensure final punctuation.
+        # 8a. Normalize internal spacing and ensure final punctuation.
         sent = _normalize_sentence_spacing_and_ending(sent)
-        # 6b. Apply local, intra-sentence stylistic normalizations.
-        sent = _normalize_local_stylistic_patterns(sent, options)
-        # 6c. Optional: Lowercasing.
+        # 8b. Optional: Lowercasing.
         if options.to_lowercase:
             sent = sent.lower()
-        # 6d. Final strip to remove any leading/trailing whitespace.
+        # 8c. Final strip to remove any leading/trailing whitespace.
         sent = sent.strip()
 
         if not sent:
